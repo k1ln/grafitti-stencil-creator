@@ -1,0 +1,4 @@
+node_modules/
+stencil-app/node_modules/
+stencil-app/dist/
+stencil-app/.vite/
