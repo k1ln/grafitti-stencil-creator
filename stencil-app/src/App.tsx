@@ -1,5 +1,13 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 
+// TypeScript declaration for the Potrace singleton loaded via public/potrace.js
+declare const Potrace: {
+  loadImageFromUrl: (url: string) => void;
+  setParameter: (p: { turdsize?: number; optcurve?: boolean; alphamax?: number; opttolerance?: number; turnpolicy?: string }) => void;
+  process: (callback: () => void) => void;
+  getSVG: (size: number, type?: string) => string;
+};
+
 interface ColorInfo {
   hex: string;
   rgb: [number, number, number];
@@ -9,6 +17,186 @@ interface ColorInfo {
 interface StencilInfo {
   canvas: HTMLCanvasElement;
   hasIslands: boolean;
+  opaquePx: number;
+}
+
+function mkColor(r: number, g: number, b: number): ColorInfo {
+  const hex = '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
+  return { hex, rgb: [r, g, b], frequency: 0 };
+}
+
+const PRESET_PALETTES: Array<{ name: string; group: string; colors: ColorInfo[] }> = [
+  // ── Retro Computers ───────────────────────────────────────────────────────────
+  { name: 'EGA 16', group: 'Retro', colors: [
+    mkColor(0,0,0),     mkColor(0,0,170),     mkColor(0,170,0),     mkColor(0,170,170),
+    mkColor(170,0,0),   mkColor(170,0,170),   mkColor(170,85,0),    mkColor(170,170,170),
+    mkColor(85,85,85),  mkColor(85,85,255),   mkColor(85,255,85),   mkColor(85,255,255),
+    mkColor(255,85,85), mkColor(255,85,255),  mkColor(255,255,85),  mkColor(255,255,255),
+  ]},
+  { name: 'ZX Spectrum', group: 'Retro', colors: [
+    mkColor(0,0,0),    mkColor(0,0,205),   mkColor(205,0,0),   mkColor(205,0,205),
+    mkColor(0,205,0),  mkColor(0,205,205), mkColor(205,205,0), mkColor(205,205,205),
+    mkColor(0,0,255),  mkColor(255,0,0),   mkColor(255,0,255), mkColor(0,255,0),
+    mkColor(0,255,255),mkColor(255,255,0), mkColor(255,255,255),
+  ]},
+  { name: 'C64', group: 'Retro', colors: [
+    mkColor(0,0,0),      mkColor(255,255,255), mkColor(159,74,68),  mkColor(106,197,204),
+    mkColor(160,89,156), mkColor(92,141,67),   mkColor(80,66,148),  mkColor(208,220,113),
+    mkColor(148,112,63), mkColor(92,69,28),    mkColor(195,118,112),mkColor(98,98,98),
+    mkColor(137,137,137),mkColor(157,217,127), mkColor(128,120,191),mkColor(165,165,165),
+  ]},
+  { name: 'Apple II', group: 'Retro', colors: [
+    mkColor(0,0,0),    mkColor(114,38,64),  mkColor(64,51,127),  mkColor(228,52,254),
+    mkColor(14,89,0),  mkColor(128,128,128),mkColor(27,154,254), mkColor(191,205,254),
+    mkColor(64,50,0),  mkColor(228,101,1),  mkColor(241,166,191),mkColor(27,203,1),
+    mkColor(191,217,128),mkColor(141,228,191),mkColor(255,255,255),
+  ]},
+  { name: 'MSX / TMS9918', group: 'Retro', colors: [
+    mkColor(0,0,0),    mkColor(33,200,66),  mkColor(94,220,120), mkColor(84,85,237),
+    mkColor(125,118,252),mkColor(212,82,77),mkColor(66,235,245), mkColor(252,85,84),
+    mkColor(255,121,120),mkColor(212,193,84),mkColor(230,206,128),mkColor(33,176,59),
+    mkColor(201,91,186),mkColor(204,204,204),mkColor(255,255,255),
+  ]},
+  { name: 'Game Boy', group: 'Retro', colors: [
+    mkColor(15,56,15), mkColor(48,98,48), mkColor(139,172,15), mkColor(155,188,15),
+  ]},
+  { name: 'CGA Cyan/Mag', group: 'Retro', colors: [
+    mkColor(0,0,0), mkColor(85,255,255), mkColor(255,85,255), mkColor(255,255,255),
+  ]},
+  { name: 'CGA Green/Red', group: 'Retro', colors: [
+    mkColor(0,0,0), mkColor(85,255,85), mkColor(255,85,85), mkColor(255,255,85),
+  ]},
+  // ── Pixel Art ─────────────────────────────────────────────────────────────────
+  { name: 'PICO-8', group: 'Pixel Art', colors: [
+    mkColor(0,0,0),      mkColor(29,43,83),    mkColor(126,37,83),  mkColor(0,135,81),
+    mkColor(171,82,54),  mkColor(95,87,79),    mkColor(194,195,199),mkColor(255,241,232),
+    mkColor(255,0,77),   mkColor(255,163,0),   mkColor(255,236,39), mkColor(0,228,54),
+    mkColor(41,173,255), mkColor(131,118,156), mkColor(255,119,168),mkColor(255,204,170),
+  ]},
+  { name: 'DawnBringer 16', group: 'Pixel Art', colors: [
+    mkColor(20,12,28),   mkColor(68,36,52),    mkColor(48,52,109),  mkColor(78,74,78),
+    mkColor(133,76,48),  mkColor(52,101,36),   mkColor(208,70,72),  mkColor(117,113,97),
+    mkColor(89,125,206), mkColor(210,125,44),  mkColor(133,149,161),mkColor(109,170,44),
+    mkColor(210,170,153),mkColor(109,194,202), mkColor(218,212,94), mkColor(222,238,214),
+  ]},
+  { name: 'DawnBringer 32', group: 'Pixel Art', colors: [
+    mkColor(0,0,0),      mkColor(34,32,52),    mkColor(69,40,60),   mkColor(102,57,49),
+    mkColor(143,86,59),  mkColor(223,113,38),  mkColor(217,160,102),mkColor(238,195,154),
+    mkColor(251,242,54), mkColor(153,229,80),  mkColor(106,190,48), mkColor(55,148,110),
+    mkColor(75,105,47),  mkColor(82,75,36),    mkColor(50,60,57),   mkColor(63,63,116),
+    mkColor(48,96,130),  mkColor(91,110,225),  mkColor(99,155,255), mkColor(95,205,228),
+    mkColor(203,219,252),mkColor(255,255,255), mkColor(155,173,183),mkColor(132,126,135),
+    mkColor(105,106,106),mkColor(89,86,82),    mkColor(118,66,138), mkColor(172,50,50),
+    mkColor(217,87,99),  mkColor(215,123,186), mkColor(143,151,74), mkColor(138,111,48),
+  ]},
+  { name: 'Sweetie 16', group: 'Pixel Art', colors: [
+    mkColor(26,28,44),   mkColor(93,39,93),   mkColor(177,62,83),  mkColor(239,125,87),
+    mkColor(255,205,117),mkColor(167,240,112),mkColor(56,183,100), mkColor(37,113,121),
+    mkColor(41,54,111),  mkColor(59,93,201),  mkColor(65,166,246), mkColor(115,239,247),
+    mkColor(244,244,244),mkColor(148,176,194),mkColor(86,108,134), mkColor(51,60,87),
+  ]},
+  { name: 'Arne 16', group: 'Pixel Art', colors: [
+    mkColor(0,0,0),      mkColor(157,157,157),mkColor(255,255,255),mkColor(190,38,51),
+    mkColor(224,111,139),mkColor(73,60,43),   mkColor(164,100,34), mkColor(235,137,49),
+    mkColor(247,226,107),mkColor(47,72,78),   mkColor(68,137,26),  mkColor(163,206,39),
+    mkColor(27,38,50),   mkColor(0,87,132),   mkColor(49,162,242), mkColor(178,220,239),
+  ]},
+  // ── Stencil-Friendly ──────────────────────────────────────────────────────────
+  { name: 'Street Art', group: 'Stencil', colors: [
+    mkColor(0,0,0),      mkColor(255,255,255),mkColor(220,20,60),  mkColor(255,69,0),
+    mkColor(255,215,0),  mkColor(0,200,100),  mkColor(0,100,220),  mkColor(148,0,211),
+    mkColor(255,105,180),mkColor(0,230,230),  mkColor(40,40,40),   mkColor(200,200,200),
+    mkColor(180,100,0),  mkColor(0,140,0),    mkColor(255,140,50), mkColor(100,0,200),
+  ]},
+  { name: 'High Contrast 8', group: 'Stencil', colors: [
+    mkColor(0,0,0),   mkColor(255,255,255),mkColor(220,20,60), mkColor(0,180,0),
+    mkColor(0,50,220),mkColor(255,220,0),  mkColor(255,120,0), mkColor(155,0,240),
+  ]},
+  { name: 'Grayscale 4', group: 'Stencil', colors: [
+    mkColor(0,0,0), mkColor(85,85,85), mkColor(170,170,170), mkColor(255,255,255),
+  ]},
+];
+
+// ── Module-level canvas helpers ──────────────────────────────────────────────
+
+function countOpaquePx(canvas: HTMLCanvasElement): number {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return 0;
+  const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  let n = 0;
+  for (let i = 3; i < data.length; i += 4) if (data[i] >= 128) n++;
+  return n;
+}
+
+/**
+ * Converts a stencil canvas to a smooth vector SVG using the Potrace algorithm.
+ * Potrace fits Bezier curves and straight segments to the pixel bitmap, producing
+ * compact, high-quality paths ideal for cutting plotters (Silhouette, Cricut…).
+ */
+function canvasToSVGPotrace(canvas: HTMLCanvasElement, fillColor: string): Promise<string> {
+  return new Promise(resolve => {
+    const w = canvas.width, h = canvas.height;
+    const ctx = canvas.getContext('2d');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (!ctx || typeof (window as any).Potrace === 'undefined') { resolve(''); return; }
+
+    // Build black-on-white temp canvas: opaque pixels → black, transparent → white.
+    // Potrace traces dark regions (luminance < 128) as foreground.
+    const src = ctx.getImageData(0, 0, w, h);
+    const tmp = document.createElement('canvas');
+    tmp.width = w; tmp.height = h;
+    const tmpCtx = tmp.getContext('2d')!;
+    const out = tmpCtx.createImageData(w, h);
+    const od = out.data;
+    for (let i = 0; i < w * h; i++) {
+      if (src.data[i * 4 + 3] >= 128) {
+        od[i * 4 + 3] = 255; // black (r,g,b stay 0)
+      } else {
+        od[i * 4] = 255; od[i * 4 + 1] = 255; od[i * 4 + 2] = 255; od[i * 4 + 3] = 255; // white
+      }
+    }
+    tmpCtx.putImageData(out, 0, 0);
+
+    Potrace.setParameter({ turdsize: 0, optcurve: true, alphamax: 1, opttolerance: 0.2 });
+    Potrace.loadImageFromUrl(tmp.toDataURL());
+    Potrace.process(() => {
+      let svg = Potrace.getSVG(1);
+      // Swap default black fill to the stencil's actual colour
+      svg = svg.replace('fill="black"', `fill="${fillColor}"`);
+      // Inject white background rect right after the opening <svg> tag
+      svg = svg.replace('><path', `><rect width="${w}" height="${h}" fill="white"/><path`);
+      resolve(svg);
+    });
+  });
+}
+
+function downloadSVG(svgContent: string, filename: string) {
+  const blob = new Blob([svgContent], { type: 'image/svg+xml' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Otsu's method — finds the optimal binary threshold from a 256-bin histogram
+ * that maximises the inter-class variance of the two resulting groups.
+ * Returns a value in [0, 255].
+ */
+function otsuValue(hist: Uint32Array): number {
+  let total = 0, sumAll = 0;
+  for (let i = 0; i < 256; i++) { total += hist[i]; sumAll += i * hist[i]; }
+  if (total === 0) return 128;
+  let wB = 0, sumB = 0, maxVar = 0, threshold = 0;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]; if (wB === 0) continue;
+    const wF = total - wB; if (wF === 0) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB, mF = (sumAll - sumB) / wF;
+    const v = wB * wF * (mB - mF) * (mB - mF);
+    if (v > maxVar) { maxVar = v; threshold = t; }
+  }
+  return threshold;
 }
 
 function App() {
@@ -20,15 +208,21 @@ function App() {
   const [stencilCanvases, setStencilCanvases] = useState<StencilInfo[]>([]);
   const [processingProgress, setProcessingProgress] = useState<{current: number, total: number, label: string} | null>(null);
   const isGeneratingRef = useRef(false);
+  const colorsEditedRef = useRef(false); // true when user has manually edited colors
+  const [mergeSelection, setMergeSelection] = useState<Set<number>>(new Set());
   const [contrast, setContrast] = useState<number>(180);
   const [simplify, setSimplify] = useState<number>(0);
   const [posterize, setPosterize] = useState<number>(0);
   const [warmth, setWarmth] = useState<number>(0);
-  const [minFeatureSize, setMinFeatureSize] = useState<number>(100);
-  const [gapCloseRadius, setGapCloseRadius] = useState<number>(4);
   const [bridgeWidth, setBridgeWidth] = useState<number>(4);
   const [minIslandSize, setMinIslandSize] = useState<number>(50);
+  const [islandCleanupSize, setIslandCleanupSize] = useState<number>(0);
+  const [displayStencils, setDisplayStencils] = useState<StencilInfo[]>([]);
+  const [svgPreviewContent, setSvgPreviewContent] = useState<string | null>(null);
+  const [svgPreviewBuilding, setSvgPreviewBuilding] = useState(false);
   const [selection, setSelection] = useState<{x: number, y: number, w: number, h: number} | null>(null);
+  const [selectedPalette, setSelectedPalette] = useState<string>('auto');
+  const [visibleLayers, setVisibleLayers] = useState<Set<number>>(new Set());
   const selectionDragRef = useRef<{startX: number, startY: number} | null>(null);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   
@@ -247,6 +441,16 @@ function App() {
     const height = canvas.height;
     const n = width * height;
 
+    // Read stencil fill color from first opaque pixel (all opaque pixels share the same color
+    // after morphologicalClose). Used when filling island holes so they don't turn black.
+    let fillR = 0, fillG = 0, fillB = 0;
+    for (let i = 0; i < n; i++) {
+      if (data[i * 4 + 3] >= 128) { fillR = data[i * 4]; fillG = data[i * 4 + 1]; fillB = data[i * 4 + 2]; break; }
+    }
+    const fillPx = (px: number) => {
+      data[px * 4] = fillR; data[px * 4 + 1] = fillG; data[px * 4 + 2] = fillB; data[px * 4 + 3] = 255;
+    };
+
     // 8-connectivity offsets: 4 cardinal + 4 diagonal
     const DX = [-1, 1, 0, 0, -1, -1, 1,  1];
     const DY = [ 0, 0,-1, 1, -1,  1,-1,  1];
@@ -327,9 +531,9 @@ function App() {
         if (y < height-1 && !compVisited[px+width] && data[(px+width)*4+3]===0) { compVisited[px+width]=1; cq.push(px+width); }
       }
 
-      // Small islands: erase (fill transparent → they'll show as stencil color in the layer)
+      // Small islands: fill with stencil color
       if (component.length <= minIslandPx) {
-        for (const px of component) data[px * 4 + 3] = 255; // make opaque = stencil color
+        for (const px of component) fillPx(px);
         continue;
       }
 
@@ -346,7 +550,7 @@ function App() {
 
       // If the minimum stencil cuts needed >= island size, filling is cheaper than bridging
       if (bestCut >= component.length) {
-        for (const px of component) data[px * 4 + 3] = 255;
+        for (const px of component) fillPx(px);
         continue;
       }
 
@@ -559,40 +763,255 @@ function App() {
     return false; // No islands
   }, []);
 
-  const extractColors = useCallback((imageData: ImageData, size: number): ColorInfo[] => {
+  /**
+   * Cross-stencil island absorption.
+   * Scans every stencil for connected components of opaque pixels that are
+   * <= maxSize pixels. Each such "speck" is reassigned to whichever neighbouring
+   * stencil shares the most border with it (or turned transparent if the speck
+   * is surrounded mostly by background). Returns a new array of StencilInfo;
+   * the original canvases are not modified.
+   */
+  const applyIslandCleanup = useCallback((
+    infos: StencilInfo[],
+    maxSize: number,
+    width: number,
+    height: number
+  ): StencilInfo[] => {
+    if (maxSize <= 0 || infos.length === 0) return infos;
+    const n = infos.length;
+    const total = width * height;
+
+    // Read pixel data once per stencil
+    const pixelDatas: Uint8ClampedArray[] = infos.map(info =>
+      info.canvas.getContext('2d')!.getImageData(0, 0, width, height).data
+    );
+
+    // Build pixel ownership map: which stencil index owns each pixel? -1 = background
+    const ownership = new Int16Array(total).fill(-1);
+    for (let si = 0; si < n; si++) {
+      const d = pixelDatas[si];
+      for (let pi = 0; pi < total; pi++) {
+        if (d[pi * 4 + 3] >= 128) ownership[pi] = si;
+      }
+    }
+
+    const newOwnership = new Int16Array(ownership);
+    // Use a single byte array where value `si+1` means "visited for stencil si".
+    // This avoids stencils 1..n-1 being skipped because stencil 0's pass
+    // pre-marked their pixels as visited.
+    const visited = new Uint8Array(total);
+
+    for (let si = 0; si < n; si++) {
+      const mark = si + 1; // 1-based so 0 stays "unvisited for this stencil"
+      for (let pi = 0; pi < total; pi++) {
+        if (visited[pi] === mark) continue;      // already handled for this stencil
+        if (ownership[pi] !== si) continue;      // not this stencil's pixel
+        visited[pi] = mark;
+
+        // BFS — collect connected component for stencil si
+        const component: number[] = [pi];
+        let head = 0;
+        while (head < component.length) {
+          const p = component[head++];
+          const x = p % width, y = (p / width) | 0;
+          const NBRS = [x > 0 ? p - 1 : -1, x < width - 1 ? p + 1 : -1, y > 0 ? p - width : -1, y < height - 1 ? p + width : -1];
+          for (const nb of NBRS) {
+            if (nb >= 0 && visited[nb] !== mark && ownership[nb] === si) { visited[nb] = mark; component.push(nb); }
+          }
+        }
+
+        if (component.length > maxSize) continue; // keep as-is
+
+        // Count contacts with other stencils / background
+        const nbCount = new Int32Array(n);
+        let bgCount = 0;
+        for (const p of component) {
+          const x = p % width, y = (p / width) | 0;
+          const NBRS = [x > 0 ? p - 1 : -1, x < width - 1 ? p + 1 : -1, y > 0 ? p - width : -1, y < height - 1 ? p + width : -1];
+          for (const nb of NBRS) {
+            if (nb < 0) continue;
+            const o = ownership[nb];
+            if (o === -1) bgCount++;
+            else if (o !== si) nbCount[o]++;
+          }
+        }
+
+        // Best absorber: stencil with most contact, fallback to background
+        let bestStencil = -1, bestCount = bgCount;
+        for (let j = 0; j < n; j++) {
+          if (nbCount[j] > bestCount) { bestCount = nbCount[j]; bestStencil = j; }
+        }
+
+        for (const p of component) newOwnership[p] = bestStencil;
+      }
+    }
+
+    // Build output canvases from updated ownership
+    return infos.map((info, si) => {
+      const srcD = pixelDatas[si];
+      // Determine this stencil's fill colour from first opaque pixel
+      let fillR = 0, fillG = 0, fillB = 0;
+      for (let pi = 0; pi < total; pi++) {
+        if (srcD[pi * 4 + 3] >= 128) { fillR = srcD[pi * 4]; fillG = srcD[pi * 4 + 1]; fillB = srcD[pi * 4 + 2]; break; }
+      }
+
+      const newCanvas = document.createElement('canvas');
+      newCanvas.width = width; newCanvas.height = height;
+      const newCtx = newCanvas.getContext('2d')!;
+      const outData = newCtx.createImageData(width, height);
+      const nd = outData.data;
+
+      for (let pi = 0; pi < total; pi++) {
+        if (newOwnership[pi] === si) {
+          if (ownership[pi] === si) {
+            // Original pixel — keep exact colour
+            nd[pi * 4] = srcD[pi * 4]; nd[pi * 4 + 1] = srcD[pi * 4 + 1]; nd[pi * 4 + 2] = srcD[pi * 4 + 2]; nd[pi * 4 + 3] = 255;
+          } else {
+            // Absorbed from another stencil — use this stencil's fill colour
+            nd[pi * 4] = fillR; nd[pi * 4 + 1] = fillG; nd[pi * 4 + 2] = fillB; nd[pi * 4 + 3] = 255;
+          }
+        }
+        // else stays transparent
+      }
+
+      newCtx.putImageData(outData, 0, 0);
+      return { canvas: newCanvas, hasIslands: false, opaquePx: countOpaquePx(newCanvas) };
+    });
+  }, []);
+
+  /**
+   * K-Means++ colour clustering.
+   * Uses deterministic farthest-point seeding: first center = most saturated pixel,
+   * subsequent centers = pixel farthest from all existing centers.
+   * Runs up to 30 EM iterations and returns `size` ColorInfo entries sorted by frequency.
+   */
+  const extractColors = useCallback((imageData: ImageData, k: number): ColorInfo[] => {
     const pixels = imageData.data;
-    const colorMap = new Map<string, number>();
+    const n = pixels.length / 4;
 
-    const step = 4;
-    for (let i = 0; i < pixels.length; i += 4 * step) {
-      const r = pixels[i];
-      const g = pixels[i + 1];
-      const b = pixels[i + 2];
-      const a = pixels[i + 3];
+    // ── 1. Build a flat sample array (max ~10 000 pixels for speed) ──────────
+    const step = Math.max(1, Math.floor(n / 10000));
+    // flat triplet storage: [r0,g0,b0, r1,g1,b1, ...]
+    const tmp: number[] = [];
+    for (let i = 0; i < n; i += step) {
+      if (pixels[i * 4 + 3] < 128) continue;
+      tmp.push(pixels[i * 4], pixels[i * 4 + 1], pixels[i * 4 + 2]);
+    }
+    const sn = tmp.length / 3; // number of sample pixels
+    if (sn < k) return [];
+    const samples = new Float32Array(tmp);
 
-      if (a < 128) continue;
+    // ── 2. Farthest-point initialisation (deterministic K-Means++) ───────────
+    const cr = new Float32Array(k), cg = new Float32Array(k), cb = new Float32Array(k);
 
-      const qr = Math.round(r / 32) * 32;
-      const qg = Math.round(g / 32) * 32;
-      const qb = Math.round(b / 32) * 32;
+    // First center: most saturated pixel
+    let bestSat = -1, firstIdx = 0;
+    for (let si = 0; si < sn; si++) {
+      const r = samples[si * 3], g = samples[si * 3 + 1], b = samples[si * 3 + 2];
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      const sat = mx === 0 ? 0 : (mx - mn) / mx;
+      if (sat > bestSat) { bestSat = sat; firstIdx = si; }
+    }
+    cr[0] = samples[firstIdx * 3]; cg[0] = samples[firstIdx * 3 + 1]; cb[0] = samples[firstIdx * 3 + 2];
 
-      const key = `${qr},${qg},${qb}`;
-      colorMap.set(key, (colorMap.get(key) || 0) + 1);
-       }
+    const minDistToCenter = new Float32Array(sn).fill(Infinity);
+    for (let ki = 1; ki < k; ki++) {
+      // Update min-distance to nearest already-placed center
+      const pr = cr[ki - 1], pg = cg[ki - 1], pb = cb[ki - 1];
+      let farthest = 0, farthestIdx = 0;
+      for (let si = 0; si < sn; si++) {
+        const dr = samples[si * 3] - pr, dg = samples[si * 3 + 1] - pg, db = samples[si * 3 + 2] - pb;
+        const d = dr * dr + dg * dg + db * db;
+        if (d < minDistToCenter[si]) minDistToCenter[si] = d;
+        if (minDistToCenter[si] > farthest) { farthest = minDistToCenter[si]; farthestIdx = si; }
+      }
+      cr[ki] = samples[farthestIdx * 3]; cg[ki] = samples[farthestIdx * 3 + 1]; cb[ki] = samples[farthestIdx * 3 + 2];
+    }
 
-    const sortedColors = Array.from(colorMap.entries())
-         .sort((a, b) => b[1] - a[1])
-         .slice(0, 50);
+    // ── 3. K-Means EM iterations ─────────────────────────────────────────────
+    const assignments = new Int32Array(sn);
+    for (let iter = 0; iter < 30; iter++) {
+      let changed = false;
 
-    return sortedColors.map(([key, frequency]) => {
-      const [r, g, b] = key.split(',').map(Number);
-      return {
-        hex: rgbToHex(r, g, b),
-        rgb: [r, g, b] as [number, number, number],
-        frequency
-       };
-     }).slice(0, size);
-    }, [rgbToHex]);
+      // E-step: assign each sample to nearest center
+      for (let si = 0; si < sn; si++) {
+        const sr = samples[si * 3], sg = samples[si * 3 + 1], sb = samples[si * 3 + 2];
+        let best = 0, bestD = Infinity;
+        for (let ki = 0; ki < k; ki++) {
+          const dr = sr - cr[ki], dg = sg - cg[ki], db = sb - cb[ki];
+          const d = dr * dr + dg * dg + db * db;
+          if (d < bestD) { bestD = d; best = ki; }
+        }
+        if (assignments[si] !== best) { assignments[si] = best; changed = true; }
+      }
+      if (!changed) break;
+
+      // M-step: recompute centers
+      const sumR = new Float64Array(k), sumG = new Float64Array(k), sumB = new Float64Array(k);
+      const cnt = new Int32Array(k);
+      for (let si = 0; si < sn; si++) {
+        const a = assignments[si];
+        sumR[a] += samples[si * 3]; sumG[a] += samples[si * 3 + 1]; sumB[a] += samples[si * 3 + 2];
+        cnt[a]++;
+      }
+      for (let ki = 0; ki < k; ki++) {
+        if (cnt[ki] > 0) { cr[ki] = sumR[ki] / cnt[ki]; cg[ki] = sumG[ki] / cnt[ki]; cb[ki] = sumB[ki] / cnt[ki]; }
+      }
+    }
+
+    // ── 4. Build ColorInfo sorted by cluster size (most frequent first) ──────
+    const freq = new Int32Array(k);
+    for (let si = 0; si < sn; si++) freq[assignments[si]]++;
+    return Array.from({ length: k }, (_, ki) => {
+      const r = Math.round(cr[ki]), g = Math.round(cg[ki]), b = Math.round(cb[ki]);
+      return { hex: rgbToHex(r, g, b), rgb: [r, g, b] as [number, number, number], frequency: freq[ki] };
+    }).filter(c => c.frequency > 0).sort((a, b) => b.frequency - a.frequency);
+  }, [rgbToHex]);
+
+  /**
+   * Otsu's method applied per stencil layer.
+   * For each opaque pixel, computes its Euclidean distance to the target cluster center.
+   * Otsu finds the optimal threshold that separates "core" pixels (close to center) from
+   * "borderline" pixels (far from center, near color boundaries).
+   * Borderline pixels are set transparent → sharper, cleaner stencil edges.
+   */
+  const otsuSharpenLayer = useCallback((canvas: HTMLCanvasElement, color: ColorInfo): void => {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imgData.data;
+    const [tr, tg, tb] = color.rgb;
+    const np = canvas.width * canvas.height;
+
+    // Compute Euclidean colour-space distance for every opaque pixel
+    const dists = new Float32Array(np);
+    let maxDist = 0;
+    for (let pi = 0; pi < np; pi++) {
+      if (data[pi * 4 + 3] < 128) { dists[pi] = -1; continue; }
+      const dr = data[pi * 4] - tr, dg = data[pi * 4 + 1] - tg, db = data[pi * 4 + 2] - tb;
+      const d = Math.sqrt(dr * dr + dg * dg + db * db); // 0 – ~441
+      dists[pi] = d;
+      if (d > maxDist) maxDist = d;
+    }
+    if (maxDist < 1) return;
+
+    // Build 256-bin histogram of distances (for opaque pixels only)
+    const hist = new Uint32Array(256);
+    for (let pi = 0; pi < np; pi++) {
+      if (dists[pi] < 0) continue;
+      hist[Math.min(255, Math.floor(dists[pi] / maxDist * 255))]++;
+    }
+
+    // Otsu threshold → distance cutoff in original units
+    const t = otsuValue(hist);
+    const cutoff = (t / 255) * maxDist;
+
+    // Erase pixels that are weakly assigned (far from the cluster center)
+    for (let pi = 0; pi < np; pi++) {
+      if (dists[pi] > cutoff) data[pi * 4 + 3] = 0;
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }, []);
 
   const processImage = useCallback((img: HTMLImageElement) => {
     const canvas = canvasRef.current;
@@ -625,6 +1044,7 @@ function App() {
     ctx.putImageData(adjustedData, 0, 0);
     setOriginalImageData(adjustedData);
 
+    setSelectedPalette('auto');
     const extractedColors = extractColors(adjustedData, paletteSize);
     setColors(extractedColors);
     }, [extractColors, paletteSize, contrast, simplify, posterize, applyContrastAndBlur]);
@@ -746,20 +1166,25 @@ function App() {
       await new Promise(r => setTimeout(r, 0));
 
       const canvas = rawCanvases[i];
-      // 1. Close gaps and small holes → clean, connected regions
-      morphologicalClose(canvas, gapCloseRadius, targetColors[i]);
-      // 2. Remove blobs still too small to cut
-      removeSmallRegions(canvas, minFeatureSize);
+      // 1. Otsu sharpening — remove borderline-assigned pixels near colour boundaries
+      otsuSharpenLayer(canvas, targetColors[i]);
+      // 2. Gap closing and min-feature removal are locked at 0 (disabled) —
+      //    the vector tracer handles shape quality; no pixel-level morphology needed.
+      // morphologicalClose(canvas, 0, targetColors[i]);
+      // removeSmallRegions(canvas, 0);
       // 3. Fix any remaining isolated islands
       const hasIslands = detectIslands(canvas);
       if (hasIslands) bridgeIslands(canvas, Math.floor(bridgeWidth / 2), minIslandSize);
-      stencilInfos.push({ canvas, hasIslands });
+      const opaquePx = countOpaquePx(canvas);
+      stencilInfos.push({ canvas, hasIslands, opaquePx });
     }
 
     setStencilCanvases(stencilInfos);
+    // All layers visible by default
+    setVisibleLayers(new Set(stencilInfos.map((_, i) => i)));
     setProcessingProgress(null);
     isGeneratingRef.current = false;
-  }, [generateAllStencilsWebGL, generateStencilCPU, morphologicalClose, removeSmallRegions, detectIslands, bridgeIslands, gapCloseRadius, minFeatureSize, bridgeWidth, minIslandSize]);
+  }, [generateAllStencilsWebGL, generateStencilCPU, detectIslands, bridgeIslands, otsuSharpenLayer, bridgeWidth, minIslandSize]);
 
   // Live preview of adjustments on canvas without triggering stencil regeneration
   const previewAdjustments = useCallback(() => {
@@ -778,11 +1203,16 @@ function App() {
     const ctx = canvasRef.current?.getContext('2d');
     if (ctx) ctx.putImageData(adjustedData, 0, 0);
     setOriginalImageData(adjustedData);
-    const extractedColors = extractColors(adjustedData, paletteSize);
-    setColors(extractedColors);
+    let colorSet: ColorInfo[];
+    if (selectedPalette === 'auto' && !colorsEditedRef.current) {
+      colorSet = extractColors(adjustedData, paletteSize);
+      setColors(colorSet);
+    } else {
+      colorSet = colors; // keep manually edited or preset palette
+    }
     // Run generation immediately with the freshly computed data (avoids stale state)
-    runGeneration(adjustedData, extractedColors, width, height);
-    }, [imageDimensions, contrast, simplify, posterize, applyContrastAndBlur, extractColors, paletteSize, runGeneration]);
+    runGeneration(adjustedData, colorSet, width, height);
+    }, [imageDimensions, contrast, simplify, posterize, applyContrastAndBlur, extractColors, paletteSize, runGeneration, selectedPalette, colors]);
 
   const updatePreview = useCallback(() => {
     if (!originalImageData || colors.length === 0 || !imageDimensions || !previewCanvasRef.current) return;
@@ -798,13 +1228,64 @@ function App() {
     previewCtx.fillStyle = 'white';
     previewCtx.fillRect(0, 0, width, height);
 
-    stencilCanvases.forEach(stencilInfo => {
-      previewCtx.drawImage(stencilInfo.canvas, 0, 0);
+    displayStencils.forEach((stencilInfo, i) => {
+      if (visibleLayers.has(i)) previewCtx.drawImage(stencilInfo.canvas, 0, 0);
       });
-    }, [stencilCanvases, originalImageData, colors.length, imageDimensions]);
+    }, [displayStencils, visibleLayers, originalImageData, colors.length, imageDimensions]);
+
+  /**
+   * Click on the preview canvas → find which stencil layer owns that pixel
+   * (iterating from top/last visible layer down) and select it for editing.
+   */
+  const handlePreviewClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!imageDimensions || displayStencils.length === 0) return;
+    const canvas = previewCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = imageDimensions.width / rect.width;
+    const scaleY = imageDimensions.height / rect.height;
+    const cx = Math.min(imageDimensions.width  - 1, Math.max(0, Math.floor((e.clientX - rect.left)  * scaleX)));
+    const cy = Math.min(imageDimensions.height - 1, Math.max(0, Math.floor((e.clientY - rect.top)   * scaleY)));
+    for (let i = displayStencils.length - 1; i >= 0; i--) {
+      if (!visibleLayers.has(i)) continue;
+      const ctx2 = displayStencils[i].canvas.getContext('2d');
+      if (!ctx2) continue;
+      const pixel = ctx2.getImageData(cx, cy, 1, 1).data;
+      if (pixel[3] >= 128) { setSelectedColorIndex(i); return; }
+    }
+  }, [imageDimensions, displayStencils, visibleLayers]);
+
+  /**
+   * Build a composite vector SVG by tracing every visible layer with Potrace
+   * and stacking the resulting <path> elements in a single <svg>.
+   */
+  const buildSVGPreview = useCallback(async () => {
+    if (!imageDimensions || displayStencils.length === 0) return;
+    setSvgPreviewBuilding(true);
+    setSvgPreviewContent(null);
+    const { width, height } = imageDimensions;
+    let paths = '';
+    for (let i = 0; i < displayStencils.length; i++) {
+      if (!visibleLayers.has(i)) continue;
+      const colorHex = colors[i]?.hex ?? '#000000';
+      const svgStr = await canvasToSVGPotrace(displayStencils[i].canvas, colorHex);
+      // Extract the <path .../> element(s) from the per-layer SVG
+      const match = svgStr.match(/<path[\s\S]*?\/>/g);
+      if (match) paths += match.join('\n') + '\n';
+    }
+    const combined = [
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+      `<rect width="${width}" height="${height}" fill="white"/>`,
+      paths,
+      `</svg>`,
+    ].join('\n');
+    setSvgPreviewContent(combined);
+    setSvgPreviewBuilding(false);
+  }, [imageDimensions, displayStencils, visibleLayers, colors]);
 
   const handleColorPickerChange = (newHex: string) => {
     if (selectedColorIndex < colors.length) {
+      colorsEditedRef.current = true;
       const rgb = hexToRgb(newHex);
       const newColors = [...colors];
       newColors[selectedColorIndex] = {
@@ -817,19 +1298,83 @@ function App() {
     };
 
   const handlePaletteSizeChange = (size: number) => {
+    colorsEditedRef.current = false;
     setPaletteSize(size);
+    setSelectedPalette('auto');
     if (originalImageData) {
-      const extractedColors = extractColors(originalImageData, size);
-      setColors(extractedColors);
-      }
-    };
+      setColors(extractColors(originalImageData, size));
+    }
+  };
 
   const handleResetColors = () => {
-    if (originalImageData) {
-      const extractedColors = extractColors(originalImageData, paletteSize);
-      setColors(extractedColors);
+    colorsEditedRef.current = false;
+    if (selectedPalette !== 'auto') {
+      const preset = PRESET_PALETTES.find(p => p.name === selectedPalette);
+      if (preset) setColors(preset.colors);
+    } else if (originalImageData) {
+      setColors(extractColors(originalImageData, paletteSize));
+    }
+  };
+
+  const handlePresetPaletteSelect = (name: string) => {
+    colorsEditedRef.current = false;
+    setSelectedPalette(name);
+    if (name === 'auto') {
+      if (originalImageData) setColors(extractColors(originalImageData, paletteSize));
+    } else {
+      const preset = PRESET_PALETTES.find(p => p.name === name);
+      if (preset) {
+        setColors(preset.colors);
+        setPaletteSize(preset.colors.length);
       }
-    };
+    }
+  };
+
+  const handleMergeStencils = useCallback(() => {
+    if (mergeSelection.size < 2 || !imageDimensions) return;
+    const { width, height } = imageDimensions;
+    const selected = [...mergeSelection].sort((a, b) => a - b);
+
+    // Average the RGB of the merged layers for a blended color label
+    const avgR = Math.round(selected.reduce((s, i) => s + (colors[i]?.rgb[0] ?? 0), 0) / selected.length);
+    const avgG = Math.round(selected.reduce((s, i) => s + (colors[i]?.rgb[1] ?? 0), 0) / selected.length);
+    const avgB = Math.round(selected.reduce((s, i) => s + (colors[i]?.rgb[2] ?? 0), 0) / selected.length);
+    const mergedColor: ColorInfo = { hex: rgbToHex(avgR, avgG, avgB), rgb: [avgR, avgG, avgB], frequency: 0 };
+
+    // Union the alpha channels — a pixel is opaque if opaque in any source layer
+    const merged = document.createElement('canvas');
+    merged.width = width; merged.height = height;
+    const mergedCtx = merged.getContext('2d')!;
+    const mergedData = mergedCtx.createImageData(width, height);
+    for (const idx of selected) {
+      const src = stencilCanvases[idx]?.canvas;
+      if (!src) continue;
+      const srcData = src.getContext('2d')!.getImageData(0, 0, width, height).data;
+      for (let pi = 0; pi < width * height; pi++) {
+        if (srcData[pi * 4 + 3] >= 128) {
+          mergedData.data[pi * 4]     = avgR;
+          mergedData.data[pi * 4 + 1] = avgG;
+          mergedData.data[pi * 4 + 2] = avgB;
+          mergedData.data[pi * 4 + 3] = 255;
+        }
+      }
+    }
+    mergedCtx.putImageData(mergedData, 0, 0);
+
+    // Insert merged stencil at position of the first selected, remove the originals
+    const firstIdx = selected[0];
+    const mergedInfo: StencilInfo = { canvas: merged, hasIslands: false, opaquePx: countOpaquePx(merged) };
+    const newStencils = stencilCanvases.filter((_, i) => !mergeSelection.has(i));
+    const newColors   = colors.filter((_, i) => !mergeSelection.has(i));
+    newStencils.splice(firstIdx, 0, mergedInfo);
+    newColors.splice(firstIdx, 0, mergedColor);
+
+    setStencilCanvases(newStencils);
+    setColors(newColors);
+    colorsEditedRef.current = true; // preserve the new merged color set
+    setMergeSelection(new Set());
+    setVisibleLayers(new Set(newStencils.map((_, i) => i)));
+  }, [mergeSelection, imageDimensions, stencilCanvases, colors, rgbToHex]);
 
   const downloadCanvasAsPNG = (canvas: HTMLCanvasElement, filename: string) => {
     const link = document.createElement('a');
@@ -837,6 +1382,21 @@ function App() {
     link.href = canvas.toDataURL('image/png');
     link.click();
     };
+
+  // Recompute displayStencils whenever the raw stencils or cleanup slider change
+  useEffect(() => {
+    if (stencilCanvases.length === 0 || !imageDimensions) {
+      setDisplayStencils(stencilCanvases);
+      return;
+    }
+    if (islandCleanupSize <= 0) {
+      setDisplayStencils(stencilCanvases);
+      return;
+    }
+    setDisplayStencils(
+      applyIslandCleanup(stencilCanvases, islandCleanupSize, imageDimensions.width, imageDimensions.height)
+    );
+  }, [stencilCanvases, islandCleanupSize, imageDimensions, applyIslandCleanup]);
 
   // Live preview on slider changes (canvas only, no stencil regeneration)
   useEffect(() => {
@@ -927,39 +1487,6 @@ function App() {
                  />
                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#888' }}>
                    <span>Off</span><span>4 levels</span><span>8 levels</span>
-                 </div>
-               </div>
-               <div style={{ flex: 1, minWidth: '200px' }}>
-                 <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px', fontWeight: 'bold' }}>
-                   Min feature: {minFeatureSize}px²
-                 </label>
-                 <input
-                   type="range"
-                   min={0}
-                   max={2000}
-                   step={25}
-                   value={minFeatureSize}
-                   onChange={(e) => setMinFeatureSize(Number(e.target.value))}
-                   style={{ width: '100%' }}
-                 />
-                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#888' }}>
-                   <span>All detail</span><span>Medium</span><span>Bold only</span>
-                 </div>
-               </div>
-               <div style={{ flex: 1, minWidth: '200px' }}>
-                 <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px', fontWeight: 'bold' }}>
-                   Close gaps: {gapCloseRadius === 0 ? 'Off' : `${gapCloseRadius}px`}
-                 </label>
-                 <input
-                   type="range"
-                   min={0}
-                   max={20}
-                   value={gapCloseRadius}
-                   onChange={(e) => setGapCloseRadius(Number(e.target.value))}
-                   style={{ width: '100%' }}
-                 />
-                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#888' }}>
-                   <span>Off</span><span>Medium (4px)</span><span>Max (20px)</span>
                  </div>
                </div>
                <div style={{ flex: 1, minWidth: '200px' }}>
@@ -1102,118 +1629,331 @@ function App() {
            <div style={{ flex: 1, minWidth: '500px' }}>
              <h2>Preview (Layered Stencils)</h2>
              <canvas 
-               ref={previewCanvasRef} 
-               style={{ border: '1px solid #ccc', width: '100%', height: 'auto', display: 'block' }} 
+               ref={previewCanvasRef}
+               onClick={handlePreviewClick}
+               style={{ border: '1px solid #ccc', width: '100%', height: 'auto', display: 'block', cursor: stencilCanvases.length > 0 ? 'crosshair' : 'default' }}
+               title="Click a colour to select it for editing"
              />
+             {stencilCanvases.length > 0 && colors.length > 0 && (() => {
+               const selColor = colors[selectedColorIndex];
+               return (
+                 <div style={{ marginTop: '8px', padding: '8px 12px', backgroundColor: '#fff', border: '2px solid #667eea', borderRadius: '6px', display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                   <span style={{ fontSize: '12px', color: '#667eea', fontWeight: 'bold', whiteSpace: 'nowrap' }}>↑ Click preview to pick</span>
+                   <div style={{ width: '32px', height: '32px', backgroundColor: selColor?.hex ?? '#000', border: '2px solid #333', borderRadius: '4px', flexShrink: 0 }} />
+                   <input
+                     type="color"
+                     value={selColor?.hex ?? '#000000'}
+                     onChange={(e) => handleColorPickerChange(e.target.value)}
+                     style={{ width: '48px', height: '32px', padding: '0', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer' }}
+                     title="Change colour"
+                   />
+                   <span style={{ fontSize: '12px', color: '#555', fontFamily: 'monospace' }}>{selColor?.hex ?? ''}</span>
+                   <span style={{ fontSize: '11px', color: '#aaa' }}>Layer {selectedColorIndex + 1}</span>
+                 </div>
+               );
+             })()}
+             {stencilCanvases.length > 0 && (
+               <div style={{ marginTop: '10px', padding: '10px 12px', backgroundColor: '#f8f9fa', border: '1px solid #dee2e6', borderRadius: '6px' }}>
+                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                   <label style={{ fontSize: '13px', fontWeight: 'bold', whiteSpace: 'nowrap' }}>
+                     Absorb islands ≤ {islandCleanupSize === 0 ? 'Off' : `${islandCleanupSize}px`}
+                   </label>
+                   <input
+                     type="range" min={0} max={1024} step={1}
+                     value={islandCleanupSize}
+                     onChange={(e) => setIslandCleanupSize(Number(e.target.value))}
+                     style={{ flex: 1, minWidth: '120px' }}
+                   />
+                   <div style={{ display: 'flex', gap: '3px', flexWrap: 'wrap' }}>
+                     {[0,1,2,4,8,16,32,64,128,256,512,1024].map(v => (
+                       <button key={v} onClick={() => setIslandCleanupSize(v)}
+                         style={{ padding: '2px 6px', fontSize: '11px', border: '1px solid #ccc', borderRadius: '3px', cursor: 'pointer', backgroundColor: islandCleanupSize === v ? '#667eea' : '#fff', color: islandCleanupSize === v ? 'white' : '#333' }}>
+                         {v === 0 ? 'Off' : v}
+                       </button>
+                     ))}
+                   </div>
+                 </div>
+               </div>
+             )}
            </div>
          </div>
 
+         {/* ── SVG Vector Preview ───────────────────────────────────────────── */}
+         {displayStencils.length > 0 && (
+           <div style={{ marginTop: '20px', padding: '16px', backgroundColor: '#f8f9fa', border: '1px solid #dee2e6', borderRadius: '6px' }}>
+             <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '12px', flexWrap: 'wrap' }}>
+               <h2 style={{ margin: 0 }}>SVG Vector Preview</h2>
+               <button
+                 onClick={buildSVGPreview}
+                 disabled={svgPreviewBuilding}
+                 style={{ padding: '7px 18px', backgroundColor: svgPreviewBuilding ? '#aaa' : '#667eea', color: 'white', border: 'none', borderRadius: '5px', cursor: svgPreviewBuilding ? 'default' : 'pointer', fontWeight: 'bold', fontSize: '13px' }}
+               >
+                 {svgPreviewBuilding ? 'Tracing…' : svgPreviewContent ? 'Re-trace' : 'Trace All Layers'}
+               </button>
+               {svgPreviewContent && (
+                 <button
+                   onClick={async () => {
+                     for (let i = 0; i < displayStencils.length; i++) {
+                       if (!visibleLayers.has(i)) continue;
+                       const colorHex = colors[i]?.hex ?? '#000000';
+                       const svgStr = await canvasToSVGPotrace(displayStencils[i].canvas, colorHex);
+                       if (svgStr) downloadSVG(svgStr, `stencil-${i + 1}-${colorHex.replace('#', '')}.svg`);
+                     }
+                   }}
+                   style={{ padding: '7px 18px', backgroundColor: '#27ae60', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold', fontSize: '13px' }}
+                 >
+                   Download All SVGs
+                 </button>
+               )}
+               <span style={{ fontSize: '12px', color: '#888' }}>Bezier-fitted vector paths via Potrace — all visible layers composited</span>
+             </div>
+             {svgPreviewContent ? (
+               <div style={{ border: '1px solid #ccc', borderRadius: '4px', overflow: 'auto', backgroundColor: 'white', maxHeight: '680px' }}>
+                 <div
+                   style={{ width: '100%' }}
+                   dangerouslySetInnerHTML={{ __html: svgPreviewContent
+                     .replace(/width="\d+"/, 'width="100%"')
+                     .replace(/height="\d+"/, 'height="auto"')
+                     .replace('<svg ', '<svg style="display:block;max-height:640px;width:100%;object-fit:contain;" ') }}
+                 />
+               </div>
+             ) : (
+               <div style={{ padding: '24px', textAlign: 'center', color: '#aaa', border: '1px dashed #ccc', borderRadius: '4px', backgroundColor: 'white' }}>
+                 Click “Trace All Layers” to generate a clean vector SVG with smooth Bezier curves
+               </div>
+             )}
+           </div>
+         )}
+
          <div style={{ marginTop: '20px' }}>
-           <h2>Colors ({colors.length})</h2>
-           <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '10px' }}>
+           <h2>Color Palette</h2>
+
+           {/* ── Palette presets ─────────────────────────────── */}
+           <div style={{ marginBottom: '16px', padding: '12px', backgroundColor: '#f8f9fa', border: '1px solid #dee2e6', borderRadius: '6px' }}>
+             <div style={{ fontSize: '13px', fontWeight: 'bold', marginBottom: '10px', color: '#444' }}>Palette Source</div>
+
+             {/* Group labels + preset buttons */}
+             {(['Retro', 'Pixel Art', 'Stencil'] as const).map(group => (
+               <div key={group} style={{ marginBottom: '8px' }}>
+                 <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>{group}</div>
+                 <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
+                   {PRESET_PALETTES.filter(p => p.group === group).map(({ name, colors: pColors }) => (
+                     <button
+                       key={name}
+                       onClick={() => handlePresetPaletteSelect(name)}
+                       title={`${name} (${pColors.length} colours)`}
+                       style={{
+                         padding: '4px 6px',
+                         border: selectedPalette === name ? '2px solid #667eea' : '1px solid #ccc',
+                         borderRadius: '5px',
+                         cursor: 'pointer',
+                         backgroundColor: selectedPalette === name ? '#eef0ff' : 'white',
+                       }}
+                     >
+                       <div style={{ display: 'flex', gap: '1px', marginBottom: '3px' }}>
+                         {pColors.slice(0, 12).map((c, i) => (
+                           <div key={i} style={{ width: '8px', height: '8px', backgroundColor: c.hex, outline: '1px solid rgba(0,0,0,0.12)' }} />
+                         ))}
+                         {pColors.length > 12 && <div style={{ width: '8px', height: '8px', backgroundColor: '#eee', fontSize: '7px', lineHeight: '8px', textAlign: 'center', color: '#999' }}>+</div>}
+                       </div>
+                       <div style={{ fontSize: '9px', whiteSpace: 'nowrap', textAlign: 'center', color: selectedPalette === name ? '#667eea' : '#555' }}>{name}</div>
+                     </button>
+                   ))}
+                 </div>
+               </div>
+             ))}
+
+             {/* Auto (from image) */}
+             <div>
+               <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>From Image</div>
+               <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                 <button
+                   onClick={() => handlePresetPaletteSelect('auto')}
+                   style={{
+                     padding: '5px 14px',
+                     border: selectedPalette === 'auto' ? '2px solid #667eea' : '1px solid #ccc',
+                     borderRadius: '5px',
+                     cursor: 'pointer',
+                     backgroundColor: selectedPalette === 'auto' ? '#eef0ff' : 'white',
+                     fontWeight: selectedPalette === 'auto' ? 'bold' : 'normal',
+                     color: selectedPalette === 'auto' ? '#667eea' : '#555',
+                     fontSize: '12px',
+                   }}
+                 >
+                   Auto-detect from image
+                 </button>
+                 {selectedPalette === 'auto' && (
+                   <div style={{ display: 'flex', gap: '3px', alignItems: 'center', flexWrap: 'wrap' }}>
+                     <span style={{ fontSize: '12px', color: '#888' }}>Colors:</span>
+                     {Array.from({ length: 20 }, (_, i) => i + 1).map((size) => (
+                       <button
+                         key={size}
+                         onClick={() => handlePaletteSizeChange(size)}
+                         style={{
+                           padding: '3px 7px',
+                           backgroundColor: size === paletteSize ? '#667eea' : '#f0f0f0',
+                           color: size === paletteSize ? 'white' : '#333',
+                           border: 'none',
+                           borderRadius: '3px',
+                           cursor: 'pointer',
+                           fontSize: '12px',
+                         }}
+                       >
+                         {size}
+                       </button>
+                     ))}
+                   </div>
+                 )}
+               </div>
+             </div>
+           </div>
+
+           {/* ── Current palette swatches ─────────────────────── */}
+           <div style={{ display: 'flex', gap: '7px', flexWrap: 'wrap', marginBottom: '10px' }}>
              {colors.map((color, index) => (
                <div
                  key={index}
                  onClick={() => setSelectedColorIndex(index)}
+                 title={color.hex}
                  style={{
-                   padding: '10px',
+                   padding: '5px',
                    border: index === selectedColorIndex ? '2px solid #333' : '1px solid #ccc',
                    borderRadius: '5px',
                    cursor: 'pointer',
-                   backgroundColor: color.hex,
-                   minWidth: '80px'
-                   }}
-                 >
-                 <div style={{ width: '50px', height: '50px', backgroundColor: color.hex, marginBottom: '5px' }} />
-                 <div style={{ fontSize: '12px' }}>Color {index + 1}</div>
+                   backgroundColor: '#fff',
+                 }}
+               >
+                 <div style={{ width: '38px', height: '38px', backgroundColor: color.hex, outline: '1px solid rgba(0,0,0,0.12)' }} />
+                 <div style={{ fontSize: '9px', textAlign: 'center', color: '#666', marginTop: '3px' }}>{color.hex}</div>
                </div>
              ))}
            </div>
-        
+
            {colors.length > 0 && (
-             <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '20px' }}>
-               <label>Edit Selected Color: </label>
+             <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '10px' }}>
+               <label style={{ fontSize: '13px' }}>Edit selected:</label>
                <input
                  type="color"
                  value={colors[selectedColorIndex]?.hex || '#000000'}
                  onChange={(e) => handleColorPickerChange(e.target.value)}
-                 style={{ width: '50px', height: '30px' }}
+                 style={{ width: '50px', height: '28px' }}
                />
                <button
                  onClick={handleResetColors}
                  style={{
-                   padding: '5px 15px',
+                   padding: '4px 12px',
                    backgroundColor: '#e74c3c',
                    color: 'white',
                    border: 'none',
-                   borderRadius: '5px',
-                   cursor: 'pointer'
-                   }}
-                 >
-                 Reset All Colors
+                   borderRadius: '4px',
+                   cursor: 'pointer',
+                   fontSize: '13px',
+                 }}
+               >
+                 Reset Colors
                </button>
              </div>
            )}
          </div>
 
-         <div style={{ marginTop: '20px', marginBottom: '20px' }}>
-           <h2>Palette Size</h2>
-           <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
-             {Array.from({ length: 20 }, (_, i) => i + 1).map((size) => (
-               <button
-                 key={size}
-                 onClick={() => handlePaletteSizeChange(size)}
-                 style={{
-                   padding: '5px 10px',
-                   backgroundColor: size === paletteSize ? '#667eea' : '#f0f0f0',
-                   color: size === paletteSize ? 'white' : '#333',
-                   border: 'none',
-                   borderRadius: '3px',
-                   cursor: 'pointer'
-                   }}
-                 >
-                   {size}
-               </button>
-             ))}
-           </div>
-         </div>
+         {stencilCanvases.length > 0 && (() => {
+           const totalPx = (imageDimensions?.width ?? 1) * (imageDimensions?.height ?? 1);
+           const minPx = totalPx * 0.005; // hide stencils covering < 0.5% of image area
+           const visible = displayStencils
+             .map((s, i) => ({ s, i }))
+             .filter(({ s }) => s.opaquePx >= minPx);
+           const hiddenCount = displayStencils.length - visible.length;
+           return (
+             <div style={{ marginTop: '20px' }}>
+               <h2 style={{ marginBottom: '6px' }}>Stencils</h2>
 
-         {stencilCanvases.length > 0 && (
-           <div style={{ marginTop: '20px' }}>
-             <h2>Individual Stencils (Full Size)</h2>
-             <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
-               {stencilCanvases.map((stencilInfo, index) => (
-                 <div key={index} style={{ border: stencilInfo.hasIslands ? '2px solid #f39c12' : '1px solid #ccc', padding: '10px', backgroundColor: 'white' }}>
-                   <h3 style={{ margin: '0 0 10px 0' }}>Stencil {index + 1} - {colors[index]?.hex}</h3>
-                   {stencilInfo.hasIslands && (
-                     <div style={{ backgroundColor: '#ffe74c', border: '2px solid #f39c12', padding: '8px', marginBottom: '10px', borderRadius: '4px', color: '#c92a2a', fontWeight: 'bold', fontSize: '14px' }}>
-                       ✓ Islands detected and connected with bridges to the template edge for safe cutting.
-                     </div>
-                   )}
-                   <img 
-                     src={stencilInfo.canvas.toDataURL('image/png')} 
-                     alt={`Stencil ${index + 1}`}
-                     style={{ width: '100%', height: 'auto', display: 'block' }}
-                   />
-                   <button
-                     onClick={() => downloadCanvasAsPNG(stencilInfo.canvas, `stencil-color-${index + 1}.png`)}
-                     style={{
-                       marginTop: '10px',
-                       padding: '5px 15px',
-                       backgroundColor: '#2ecc71',
-                       color: 'white',
-                       border: 'none',
-                       borderRadius: '3px',
-                       cursor: 'pointer'
-                       }}
-                     >
-                     Download
-                   </button>
+               {hiddenCount > 0 && (
+                 <div style={{ marginBottom: '12px', fontSize: '13px', color: '#888' }}>
+                   {hiddenCount} stencil{hiddenCount > 1 ? 's' : ''} hidden (too little coverage)
                  </div>
-               ))}
+               )}
+               {mergeSelection.size >= 2 && (
+                 <button
+                   onClick={handleMergeStencils}
+                   style={{ marginBottom: '12px', padding: '7px 20px', backgroundColor: '#e67e22', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold', fontSize: '14px' }}
+                 >
+                   Merge {mergeSelection.size} selected stencils
+                 </button>
+               )}
+               <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
+                 {visible.map(({ s: stencilInfo, i: index }) => {
+                   const coveragePct = ((stencilInfo.opaquePx / totalPx) * 100).toFixed(1);
+                   const colorHex = colors[index]?.hex ?? '#000000';
+                   const inMerge = mergeSelection.has(index);
+                   return (
+                     <div key={index} style={{ border: inMerge ? '2px solid #e67e22' : stencilInfo.hasIslands ? '2px solid #f39c12' : '1px solid #ccc', padding: '10px', backgroundColor: 'white', minWidth: '220px' }}>
+                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                         <input
+                           type="checkbox"
+                           checked={inMerge}
+                           onChange={() => setMergeSelection(prev => {
+                             const next = new Set(prev);
+                             if (next.has(index)) next.delete(index); else next.add(index);
+                             return next;
+                           })}
+                           title="Select for merge"
+                           style={{ width: '15px', height: '15px', cursor: 'pointer', flexShrink: 0 }}
+                         />
+                         <div style={{ width: '18px', height: '18px', backgroundColor: colorHex, outline: '1px solid rgba(0,0,0,0.2)', borderRadius: '2px', flexShrink: 0 }} />
+                         <span style={{ fontWeight: 'bold', fontSize: '14px' }}>Stencil {index + 1}</span>
+                         <span style={{ fontSize: '12px', color: '#888' }}>{colorHex} · {coveragePct}%</span>
+                         <button
+                           onClick={() => setVisibleLayers(prev => {
+                             const next = new Set(prev);
+                             if (next.has(index)) next.delete(index); else next.add(index);
+                             return next;
+                           })}
+                           title={visibleLayers.has(index) ? 'Hide in preview' : 'Show in preview'}
+                           style={{
+                             marginLeft: 'auto', padding: '2px 8px', border: '1px solid #ccc',
+                             borderRadius: '4px', cursor: 'pointer', fontSize: '13px',
+                             backgroundColor: visibleLayers.has(index) ? '#eef0ff' : '#f5f5f5',
+                             color: visibleLayers.has(index) ? '#667eea' : '#aaa',
+                             fontWeight: 'bold',
+                           }}
+                         >
+                           {visibleLayers.has(index) ? '👁 On' : '👁 Off'}
+                         </button>
+                       </div>
+                       {stencilInfo.hasIslands && (
+                         <div style={{ backgroundColor: '#ffe74c', border: '1px solid #f39c12', padding: '5px 8px', marginBottom: '8px', borderRadius: '4px', color: '#c92a2a', fontSize: '12px' }}>
+                           ✓ Islands bridged for safe cutting
+                         </div>
+                       )}
+                       <img
+                         src={stencilInfo.canvas.toDataURL('image/png')}
+                         alt={`Stencil ${index + 1}`}
+                         style={{ width: '100%', height: 'auto', display: 'block', border: '1px solid #eee' }}
+                       />
+                       <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
+                         <button
+                           onClick={() => downloadCanvasAsPNG(stencilInfo.canvas, `stencil-${index + 1}-${colorHex.replace('#', '')}.png`)}
+                           style={{ flex: 1, padding: '6px 0', backgroundColor: '#2ecc71', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold' }}
+                         >
+                           PNG
+                         </button>
+                         <button
+                           onClick={async () => {
+                             const svgContent = await canvasToSVGPotrace(stencilInfo.canvas, colorHex);
+                             if (svgContent) downloadSVG(svgContent, `stencil-${index + 1}-${colorHex.replace('#', '')}.svg`);
+                           }}
+                           style={{ flex: 1, padding: '6px 0', backgroundColor: '#8e44ad', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold' }}
+                         >
+                           SVG
+                         </button>
+                       </div>
+                     </div>
+                   );
+                 })}
+               </div>
              </div>
-           </div>
-         )}
+           );
+         })()}
        </div>
      );
 }
