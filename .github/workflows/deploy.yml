@@ -30,26 +30,25 @@ jobs:
         working-directory: stencil-app
         run: npm run build
 
-      - name: Install AWS CLI
-        run: |
-          pip install awscli --quiet
+      - name: Install rclone
+        run: curl https://rclone.org/install.sh | sudo bash
 
       - name: Sync to Scaleway Object Storage
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.SCW_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.SCW_SECRET_KEY }}
+          RCLONE_CONFIG_SCW_TYPE: s3
+          RCLONE_CONFIG_SCW_PROVIDER: Scaleway
+          RCLONE_CONFIG_SCW_ACCESS_KEY_ID: ${{ secrets.SCW_ACCESS_KEY }}
+          RCLONE_CONFIG_SCW_SECRET_ACCESS_KEY: ${{ secrets.SCW_SECRET_KEY }}
+          RCLONE_CONFIG_SCW_REGION: fr-par
+          RCLONE_CONFIG_SCW_ENDPOINT: s3.fr-par.scw.cloud
           BUCKET_NAME: ${{ secrets.SCW_BUCKET_NAME }}
-          AWS_DEFAULT_REGION: fr-par
         run: |
-          aws s3 sync stencil-app/dist/ s3://${BUCKET_NAME}/ \
-            --endpoint-url https://s3.fr-par.scw.cloud \
-            --region fr-par \
-            --delete \
-            --cache-control "public, max-age=31536000, immutable" \
-            --exclude "index.html"
+          # Sync all assets with long-lived caching (hashed filenames), except index.html
+          rclone sync stencil-app/dist/ scw:${BUCKET_NAME}/ \
+            --exclude "index.html" \
+            --header-upload "Cache-Control: public, max-age=31536000, immutable" \
+            --transfers 8
 
           # Upload index.html with no-cache so updates are picked up immediately
-          aws s3 cp stencil-app/dist/index.html s3://${BUCKET_NAME}/index.html \
-            --endpoint-url https://s3.fr-par.scw.cloud \
-            --region fr-par \
-            --cache-control "no-cache, no-store, must-revalidate"
+          rclone copyto stencil-app/dist/index.html scw:${BUCKET_NAME}/index.html \
+            --header-upload "Cache-Control: no-cache, no-store, must-revalidate"
