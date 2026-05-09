@@ -1256,7 +1256,7 @@ function App() {
     setProcessingProgress(null);
     isGeneratingRef.current = false;
   }, [generateAllStencilsWebGL, generateStencilCPU, detectIslands, bridgeIslands, otsuSharpenLayer, bridgeWidth, minIslandSize]);
- 
+
   // Live preview of adjustments on canvas without triggering stencil regeneration
   const previewAdjustments = useCallback(() => {
     if (!rawImageRef.current || !imageDimensions || !canvasRef.current) return;
