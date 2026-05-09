@@ -20,6 +20,48 @@ interface StencilInfo {
   opaquePx: number;
 }
 
+// ── CIE Lab colour helpers ────────────────────────────────────────────────
+// sRGB [0,255] → CIE L*a*b* (D65). Lab is perceptually uniform: equal
+// numeric differences correspond to equal perceived colour differences,
+// making it ideal for palette clustering and nearest-color assignment.
+function rgbToLab(r: number, g: number, b: number): [number, number, number] {
+  let rl = r / 255, gl = g / 255, bl = b / 255;
+  rl = rl > 0.04045 ? Math.pow((rl + 0.055) / 1.055, 2.4) : rl / 12.92;
+  gl = gl > 0.04045 ? Math.pow((gl + 0.055) / 1.055, 2.4) : gl / 12.92;
+  bl = bl > 0.04045 ? Math.pow((bl + 0.055) / 1.055, 2.4) : bl / 12.92;
+  // Linear RGB → XYZ (D65 illuminant)
+  const X = (0.4124564 * rl + 0.3575761 * gl + 0.1804375 * bl) / 0.95047;
+  const Y = (0.2126729 * rl + 0.7151522 * gl + 0.0721750 * bl);
+  const Z = (0.0193339 * rl + 0.1191920 * gl + 0.9503041 * bl) / 1.08883;
+  const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787037 * t + 16 / 116;
+  return [
+    116 * f(Y) - 16,          // L  0..100
+    500 * (f(X) - f(Y)),      // a  −128..+127
+    200 * (f(Y) - f(Z)),      // b  −128..+127
+  ];
+}
+
+// CIE L*a*b* → sRGB [0,255]  (used to convert Lab K-Means centres back to RGB)
+function labToRgb(L: number, a: number, b: number): [number, number, number] {
+  const fy = (L + 16) / 116;
+  const fx = a / 500 + fy;
+  const fz = fy - b / 200;
+  const eps = 0.008856, kappa = 903.3;
+  const xr = fx * fx * fx > eps ? fx * fx * fx : (116 * fx - 16) / kappa;
+  const yr = L > kappa * eps ? Math.pow((L + 16) / 116, 3) : L / kappa;
+  const zr = fz * fz * fz > eps ? fz * fz * fz : (116 * fz - 16) / kappa;
+  const X = xr * 0.95047, Y = yr, Z = zr * 1.08883;
+  let rl =  3.2404542 * X - 1.5371385 * Y - 0.4985314 * Z;
+  let gl = -0.9692660 * X + 1.8760108 * Y + 0.0415560 * Z;
+  let bl_ =  0.0556434 * X - 0.2040259 * Y + 1.0572252 * Z;
+  const gc = (c: number) => c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(Math.max(0, c), 1 / 2.4) - 0.055;
+  return [
+    Math.max(0, Math.min(255, Math.round(gc(rl)  * 255))),
+    Math.max(0, Math.min(255, Math.round(gc(gl)  * 255))),
+    Math.max(0, Math.min(255, Math.round(gc(bl_) * 255))),
+  ];
+}
+
 function mkColor(r: number, g: number, b: number): ColorInfo {
   const hex = '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
   return { hex, rgb: [r, g, b], frequency: 0 };
@@ -245,12 +287,13 @@ function App() {
        ];
      }, []);
 
+  // Perceptual colour distance in CIE Lab space (ΔE)
   const colorDistance = useCallback((rgb1: [number, number, number], rgb2: [number, number, number]): number => {
-    const dr = rgb1[0] - rgb2[0];
-    const dg = rgb1[1] - rgb2[1];
-    const db = rgb1[2] - rgb2[2];
-    return Math.sqrt(dr * dr + dg * dg + db * db);
-     }, []);
+    const [L1, a1, b1] = rgbToLab(rgb1[0], rgb1[1], rgb1[2]);
+    const [L2, a2, b2] = rgbToLab(rgb2[0], rgb2[1], rgb2[2]);
+    const dL = L1 - L2, da = a1 - a2, db = b1 - b2;
+    return Math.sqrt(dL * dL + da * da + db * db);
+  }, []);
 
   // WebGL-accelerated: generate all stencil layers in one GPU pass per color
   const generateAllStencilsWebGL = useCallback((
@@ -280,14 +323,31 @@ function App() {
       uniform int u_targetIndex;
       uniform vec3 u_targetColor;
       varying vec2 v_texCoord;
+
+      // sRGB [0,1] -> CIE L*a*b* for perceptually-uniform nearest-colour search
+      vec3 srgbToLab(vec3 c) {
+        vec3 lin;
+        lin.r = c.r <= 0.04045 ? c.r / 12.92 : pow((c.r + 0.055) / 1.055, 2.4);
+        lin.g = c.g <= 0.04045 ? c.g / 12.92 : pow((c.g + 0.055) / 1.055, 2.4);
+        lin.b = c.b <= 0.04045 ? c.b / 12.92 : pow((c.b + 0.055) / 1.055, 2.4);
+        float X = (0.4124564*lin.r + 0.3575761*lin.g + 0.1804375*lin.b) / 0.95047;
+        float Y =  0.2126729*lin.r + 0.7151522*lin.g + 0.0721750*lin.b;
+        float Z = (0.0193339*lin.r + 0.1191920*lin.g + 0.9503041*lin.b) / 1.08883;
+        float fx = X > 0.008856 ? pow(X, 0.333333) : 7.787037*X + 0.137931;
+        float fy = Y > 0.008856 ? pow(Y, 0.333333) : 7.787037*Y + 0.137931;
+        float fz = Z > 0.008856 ? pow(Z, 0.333333) : 7.787037*Z + 0.137931;
+        return vec3(116.0*fy - 16.0, 500.0*(fx - fy), 200.0*(fy - fz));
+      }
+
       void main() {
         vec4 pixel = texture2D(u_image, v_texCoord);
         if (pixel.a < 0.5) { gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); return; }
-        vec3 rgb = pixel.rgb;
+        vec3 pixLab = srgbToLab(pixel.rgb);
         float minDist = 1.0e10;
         int closestIdx = 0;
         for (int i = 0; i < 20; i++) {
-          vec3 diff = rgb - u_palette[i];
+          vec3 palLab = srgbToLab(u_palette[i]);
+          vec3 diff = pixLab - palLab;
           float dist = dot(diff, diff);
           if (dist < minDist) { minDist = dist; closestIdx = i; }
         }
@@ -901,69 +961,77 @@ function App() {
     if (sn < k) return [];
     const samples = new Float32Array(tmp);
 
-    // ── 2. Farthest-point initialisation (deterministic K-Means++) ───────────
-    const cr = new Float32Array(k), cg = new Float32Array(k), cb = new Float32Array(k);
-
-    // First center: most saturated pixel
-    let bestSat = -1, firstIdx = 0;
+    // ── 2. Pre-convert all samples to CIE Lab (perceptually uniform space) ───
+    // Clustering in Lab means equal numeric distances map to equal perceived
+    // colour differences — centres converge to genuinely distinct hues rather
+    // than being pulled together by non-linearities in sRGB.
+    const labSamples = new Float32Array(sn * 3);
     for (let si = 0; si < sn; si++) {
-      const r = samples[si * 3], g = samples[si * 3 + 1], b = samples[si * 3 + 2];
-      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-      const sat = mx === 0 ? 0 : (mx - mn) / mx;
-      if (sat > bestSat) { bestSat = sat; firstIdx = si; }
+      const [L, a, b] = rgbToLab(samples[si * 3], samples[si * 3 + 1], samples[si * 3 + 2]);
+      labSamples[si * 3] = L; labSamples[si * 3 + 1] = a; labSamples[si * 3 + 2] = b;
     }
-    cr[0] = samples[firstIdx * 3]; cg[0] = samples[firstIdx * 3 + 1]; cb[0] = samples[firstIdx * 3 + 2];
+
+    // ── 3. Farthest-point initialisation (K-Means++ style, in Lab space) ─────
+    const cL = new Float32Array(k), cA = new Float32Array(k), cB = new Float32Array(k);
+
+    // First center: most saturated pixel (high chroma = large a²+b² in Lab)
+    let bestChroma = -1, firstIdx = 0;
+    for (let si = 0; si < sn; si++) {
+      const a = labSamples[si * 3 + 1], b = labSamples[si * 3 + 2];
+      const chroma = a * a + b * b;
+      if (chroma > bestChroma) { bestChroma = chroma; firstIdx = si; }
+    }
+    cL[0] = labSamples[firstIdx * 3]; cA[0] = labSamples[firstIdx * 3 + 1]; cB[0] = labSamples[firstIdx * 3 + 2];
 
     const minDistToCenter = new Float32Array(sn).fill(Infinity);
     for (let ki = 1; ki < k; ki++) {
-      // Update min-distance to nearest already-placed center
-      const pr = cr[ki - 1], pg = cg[ki - 1], pb = cb[ki - 1];
+      const pL = cL[ki - 1], pA = cA[ki - 1], pBv = cB[ki - 1];
       let farthest = 0, farthestIdx = 0;
       for (let si = 0; si < sn; si++) {
-        const dr = samples[si * 3] - pr, dg = samples[si * 3 + 1] - pg, db = samples[si * 3 + 2] - pb;
-        const d = dr * dr + dg * dg + db * db;
+        const dL = labSamples[si * 3] - pL, dA = labSamples[si * 3 + 1] - pA, dBv = labSamples[si * 3 + 2] - pBv;
+        const d = dL * dL + dA * dA + dBv * dBv;
         if (d < minDistToCenter[si]) minDistToCenter[si] = d;
         if (minDistToCenter[si] > farthest) { farthest = minDistToCenter[si]; farthestIdx = si; }
       }
-      cr[ki] = samples[farthestIdx * 3]; cg[ki] = samples[farthestIdx * 3 + 1]; cb[ki] = samples[farthestIdx * 3 + 2];
+      cL[ki] = labSamples[farthestIdx * 3]; cA[ki] = labSamples[farthestIdx * 3 + 1]; cB[ki] = labSamples[farthestIdx * 3 + 2];
     }
 
-    // ── 3. K-Means EM iterations ─────────────────────────────────────────────
+    // ── 4. K-Means EM iterations in Lab space ────────────────────────────────
     const assignments = new Int32Array(sn);
     for (let iter = 0; iter < 30; iter++) {
       let changed = false;
 
-      // E-step: assign each sample to nearest center
+      // E-step: assign each sample to nearest Lab centre
       for (let si = 0; si < sn; si++) {
-        const sr = samples[si * 3], sg = samples[si * 3 + 1], sb = samples[si * 3 + 2];
+        const sL = labSamples[si * 3], sA = labSamples[si * 3 + 1], sBv = labSamples[si * 3 + 2];
         let best = 0, bestD = Infinity;
         for (let ki = 0; ki < k; ki++) {
-          const dr = sr - cr[ki], dg = sg - cg[ki], db = sb - cb[ki];
-          const d = dr * dr + dg * dg + db * db;
+          const dL = sL - cL[ki], dA = sA - cA[ki], dBv = sBv - cB[ki];
+          const d = dL * dL + dA * dA + dBv * dBv;
           if (d < bestD) { bestD = d; best = ki; }
         }
         if (assignments[si] !== best) { assignments[si] = best; changed = true; }
       }
       if (!changed) break;
 
-      // M-step: recompute centers
-      const sumR = new Float64Array(k), sumG = new Float64Array(k), sumB = new Float64Array(k);
+      // M-step: recompute Lab centres as mean of assigned samples
+      const sumL = new Float64Array(k), sumA = new Float64Array(k), sumBv = new Float64Array(k);
       const cnt = new Int32Array(k);
       for (let si = 0; si < sn; si++) {
         const a = assignments[si];
-        sumR[a] += samples[si * 3]; sumG[a] += samples[si * 3 + 1]; sumB[a] += samples[si * 3 + 2];
+        sumL[a] += labSamples[si * 3]; sumA[a] += labSamples[si * 3 + 1]; sumBv[a] += labSamples[si * 3 + 2];
         cnt[a]++;
       }
       for (let ki = 0; ki < k; ki++) {
-        if (cnt[ki] > 0) { cr[ki] = sumR[ki] / cnt[ki]; cg[ki] = sumG[ki] / cnt[ki]; cb[ki] = sumB[ki] / cnt[ki]; }
+        if (cnt[ki] > 0) { cL[ki] = sumL[ki] / cnt[ki]; cA[ki] = sumA[ki] / cnt[ki]; cB[ki] = sumBv[ki] / cnt[ki]; }
       }
     }
 
-    // ── 4. Build ColorInfo sorted by cluster size (most frequent first) ──────
+    // ── 5. Build ColorInfo — convert Lab centres back to sRGB ────────────────
     const freq = new Int32Array(k);
     for (let si = 0; si < sn; si++) freq[assignments[si]]++;
     return Array.from({ length: k }, (_, ki) => {
-      const r = Math.round(cr[ki]), g = Math.round(cg[ki]), b = Math.round(cb[ki]);
+      const [r, g, b] = labToRgb(cL[ki], cA[ki], cB[ki]);
       return { hex: rgbToHex(r, g, b), rgb: [r, g, b] as [number, number, number], frequency: freq[ki] };
     }).filter(c => c.frequency > 0).sort((a, b) => b.frequency - a.frequency);
   }, [rgbToHex]);
@@ -982,14 +1050,17 @@ function App() {
     const data = imgData.data;
     const [tr, tg, tb] = color.rgb;
     const np = canvas.width * canvas.height;
+    const targetLab = rgbToLab(tr, tg, tb);
 
-    // Compute Euclidean colour-space distance for every opaque pixel
+    // Compute perceptual ΔE distance (CIE Lab) for every opaque pixel — far better
+    // than RGB Euclidean for detecting genuine colour boundaries.
     const dists = new Float32Array(np);
     let maxDist = 0;
     for (let pi = 0; pi < np; pi++) {
       if (data[pi * 4 + 3] < 128) { dists[pi] = -1; continue; }
-      const dr = data[pi * 4] - tr, dg = data[pi * 4 + 1] - tg, db = data[pi * 4 + 2] - tb;
-      const d = Math.sqrt(dr * dr + dg * dg + db * db); // 0 – ~441
+      const [pL, pA, pB] = rgbToLab(data[pi * 4], data[pi * 4 + 1], data[pi * 4 + 2]);
+      const dL = pL - targetLab[0], dA = pA - targetLab[1], dB = pB - targetLab[2];
+      const d = Math.sqrt(dL * dL + dA * dA + dB * dB); // ΔE, approx 0–150
       dists[pi] = d;
       if (d > maxDist) maxDist = d;
     }
@@ -1284,18 +1355,69 @@ function App() {
   }, [imageDimensions, displayStencils, visibleLayers, colors]);
 
   const handleColorPickerChange = (newHex: string) => {
-    if (selectedColorIndex < colors.length) {
+    const idx = selectedColorIndex;
+    if (idx < colors.length) {
       colorsEditedRef.current = true;
       const rgb = hexToRgb(newHex);
       const newColors = [...colors];
-      newColors[selectedColorIndex] = {
-        ...newColors[selectedColorIndex],
-        hex: newHex,
-        rgb
-       };
+      newColors[idx] = { ...newColors[idx], hex: newHex, rgb };
       setColors(newColors);
+      // Remap all pixels on this stencil layer to the new colour — instant swap, no re-render
+      const cv = stencilCanvases[idx]?.canvas;
+      if (cv) {
+        const cx = cv.getContext('2d');
+        if (cx) {
+          const id = cx.getImageData(0, 0, cv.width, cv.height);
+          const dd = id.data;
+          const [nr, ng, nb] = rgb;
+          for (let pi = 0; pi < cv.width * cv.height; pi++) {
+            if (dd[pi * 4 + 3] >= 128) { dd[pi * 4] = nr; dd[pi * 4 + 1] = ng; dd[pi * 4 + 2] = nb; }
+          }
+          cx.putImageData(id, 0, 0);
+          setStencilCanvases(prev => [...prev]);
+        }
       }
-    };
+    }
+  };
+
+  const handleDeleteColor = useCallback((index: number) => {
+    if (colors.length <= 1) return;
+    colorsEditedRef.current = true;
+    const newColors = colors.filter((_, i) => i !== index);
+    const newStencils = stencilCanvases.filter((_, i) => i !== index);
+    setColors(newColors);
+    setStencilCanvases(newStencils);
+    setSelectedColorIndex(prev => {
+      if (prev === index) return Math.max(0, index - 1);
+      if (prev > index) return prev - 1;
+      return prev;
+    });
+    setVisibleLayers(prev => {
+      const next = new Set<number>();
+      prev.forEach(i => {
+        if (i < index) next.add(i);
+        else if (i > index) next.add(i - 1);
+      });
+      return next;
+    });
+    setMergeSelection(new Set());
+  }, [colors, stencilCanvases]);
+
+  const handleAddColor = useCallback(() => {
+    colorsEditedRef.current = true;
+    const newColor = mkColor(0, 0, 0);
+    const newColors = [...colors, newColor];
+    setColors(newColors);
+    const width = imageDimensions?.width ?? 1;
+    const height = imageDimensions?.height ?? 1;
+    const blankCanvas = document.createElement('canvas');
+    blankCanvas.width = width;
+    blankCanvas.height = height;
+    const blankInfo: StencilInfo = { canvas: blankCanvas, hasIslands: false, opaquePx: 0 };
+    setStencilCanvases(prev => [...prev, blankInfo]);
+    setSelectedColorIndex(newColors.length - 1);
+    setVisibleLayers(prev => new Set([...prev, newColors.length - 1]));
+  }, [colors, imageDimensions]);
 
   const handlePaletteSizeChange = (size: number) => {
     colorsEditedRef.current = false;
@@ -1408,22 +1530,49 @@ function App() {
     }, [updatePreview]);
 
   return (
-       <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif', maxWidth: '1400px', margin: '0 auto' }}>
-         <h1>Stencil Creator</h1>
-      
+       <div style={{ padding: '24px 28px', fontFamily: "'Inter', Arial, sans-serif", maxWidth: '1400px', margin: '0 auto', color: '#f0f0f0' }}>
+         {/* ── Graffiti Logo ──────────────────────────────────────────── */}
+         <div style={{ textAlign: 'center', marginBottom: '36px', padding: '20px 0 8px' }}>
+           <div style={{
+             fontFamily: "'Bangers', cursive",
+             fontSize: 'clamp(42px, 7vw, 86px)',
+             letterSpacing: '6px',
+             lineHeight: 1.1,
+             color: '#fff',
+             textShadow: '4px 4px 0 #c0392b, 8px 8px 0 #e67e22, -2px -2px 0 rgba(102,126,234,0.9), 0 0 40px rgba(102,126,234,0.5), 0 0 80px rgba(231,76,60,0.25)',
+             userSelect: 'none',
+           }}>
+             STENCIL TOOL
+           </div>
+           <div style={{
+             fontFamily: "'Bangers', cursive",
+             fontSize: '15px',
+             letterSpacing: '9px',
+             color: '#667eea',
+             marginTop: '8px',
+             opacity: 0.85,
+           }}>
+             ✦ STREET ART GENERATOR ✦
+           </div>
+         </div>
+
          <div style={{ marginBottom: '20px' }}>
            <button
              onClick={() => fileInputRef.current?.click()}
              style={{
-               padding: '10px 20px',
-               backgroundColor: '#667eea',
+               padding: '13px 36px',
+               background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
                color: 'white',
                border: 'none',
-               borderRadius: '5px',
-               cursor: 'pointer'
-               }}
-             >
-             Upload Image
+               borderRadius: '6px',
+               cursor: 'pointer',
+               fontFamily: "'Bangers', cursive",
+               fontSize: '22px',
+               letterSpacing: '3px',
+               boxShadow: '0 4px 20px rgba(102,126,234,0.5), inset 0 1px 0 rgba(255,255,255,0.15)',
+             }}
+           >
+             📤 UPLOAD IMAGE
            </button>
            <input
              ref={fileInputRef}
@@ -1438,8 +1587,8 @@ function App() {
          </div>
 
          {imageDimensions && (
-           <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f8f9fa', border: '1px solid #dee2e6', borderRadius: '5px' }}>
-             <h3 style={{ margin: '0 0 12px 0', fontSize: '16px' }}>Image Adjustments</h3>
+           <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#252525', border: '1px solid #333', borderRadius: '8px' }}>
+             <h3 style={{ margin: '0 0 12px 0', fontSize: '16px', fontFamily: "'Bangers', cursive", letterSpacing: '2px', color: '#f0f0f0' }}>⚙ IMAGE ADJUSTMENTS</h3>
              <div style={{ display: 'flex', gap: '30px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
                <div style={{ flex: 1, minWidth: '200px' }}>
                  <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px', fontWeight: 'bold' }}>
@@ -1526,17 +1675,19 @@ function App() {
                  <button
                    onClick={handleApplyAdjustments}
                    style={{
-                     padding: '10px 24px',
-                     backgroundColor: '#27ae60',
-                     color: 'white',
+                     padding: '12px 26px',
+                     background: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)',
+                     color: '#051a05',
                      border: 'none',
-                     borderRadius: '5px',
+                     borderRadius: '6px',
                      cursor: 'pointer',
-                     fontWeight: 'bold',
-                     fontSize: '14px'
+                     fontFamily: "'Bangers', cursive",
+                     fontSize: '20px',
+                     letterSpacing: '2px',
+                     boxShadow: '0 4px 18px rgba(17,153,142,0.5)',
                    }}
                  >
-                   Apply &amp; Generate Stencils
+                   ⚡ APPLY &amp; GENERATE STENCILS
                  </button>
                </div>
              </div>
@@ -1544,11 +1695,11 @@ function App() {
          )}
 
          {processingProgress && (
-           <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#ecf0f1', borderRadius: '5px' }}>
+           <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#252525', borderRadius: '8px', border: '1px solid #333' }}>
              <div style={{ marginBottom: '8px', fontWeight: 'bold', fontSize: '14px' }}>
                {processingProgress.label}
              </div>
-             <div style={{ width: '100%', height: '20px', backgroundColor: '#bdc3c7', borderRadius: '3px', overflow: 'hidden' }}>
+             <div style={{ width: '100%', height: '20px', backgroundColor: '#111', borderRadius: '3px', overflow: 'hidden', border: '1px solid #444' }}>
                <div
                  style={{
                    height: '100%',
@@ -1571,7 +1722,7 @@ function App() {
            </div>
          )}
 
-         <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', marginBottom: '20px' }}>
+         <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', marginBottom: '20px', alignItems: 'flex-start' }}>
            <div style={{ flex: 1, minWidth: '300px' }}>
              <h2>Original Image</h2>
              <div
@@ -1584,7 +1735,7 @@ function App() {
              >
                <canvas
                  ref={canvasRef}
-                 style={{ border: '1px solid #ccc', width: '100%', height: 'auto', display: 'block', userSelect: 'none' }}
+                 style={{ border: '1px solid #3a3a3a', width: '100%', height: 'auto', display: 'block', userSelect: 'none' }}
                />
                {selection && selection.w > 2 && selection.h > 2 && imageDimensions && (() => {
                  const canvas = canvasRef.current;
@@ -1612,13 +1763,13 @@ function App() {
                <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
                  <button
                    onClick={handleCropToSelection}
-                   style={{ padding: '6px 16px', backgroundColor: '#e74c3c', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                   style={{ padding: '7px 18px', background: 'linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontFamily: "'Bangers', cursive", fontSize: '16px', letterSpacing: '1px' }}
                  >
                    ✂ Crop to Selection
                  </button>
                  <button
                    onClick={() => setSelection(null)}
-                   style={{ padding: '6px 12px', backgroundColor: '#95a5a6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                   style={{ padding: '7px 14px', backgroundColor: '#3a3a3a', color: '#ccc', border: '1px solid #555', borderRadius: '4px', cursor: 'pointer', fontFamily: "'Bangers', cursive", fontSize: '15px', letterSpacing: '1px' }}
                  >
                    Clear
                  </button>
@@ -1627,17 +1778,38 @@ function App() {
            </div>
         
            <div style={{ flex: 1, minWidth: '500px' }}>
-             <h2>Preview (Layered Stencils)</h2>
+             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginBottom: '6px' }}>
+               <h2 style={{ margin: 0 }}>Preview (Layered Stencils)</h2>
+               {imageDimensions && (
+                 <button
+                   onClick={handleApplyAdjustments}
+                   style={{
+                     padding: '8px 20px',
+                     background: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)',
+                     color: '#051a05',
+                     border: 'none',
+                     borderRadius: '6px',
+                     cursor: 'pointer',
+                     fontFamily: "'Bangers', cursive",
+                     fontSize: '17px',
+                     letterSpacing: '2px',
+                     boxShadow: '0 3px 12px rgba(17,153,142,0.45)',
+                   }}
+                 >
+                   ⚡ RE-RENDER
+                 </button>
+               )}
+             </div>
              <canvas 
                ref={previewCanvasRef}
                onClick={handlePreviewClick}
-               style={{ border: '1px solid #ccc', width: '100%', height: 'auto', display: 'block', cursor: stencilCanvases.length > 0 ? 'crosshair' : 'default' }}
+               style={{ border: '1px solid #3a3a3a', width: '100%', height: 'auto', display: 'block', cursor: stencilCanvases.length > 0 ? 'crosshair' : 'default' }}
                title="Click a colour to select it for editing"
              />
              {stencilCanvases.length > 0 && colors.length > 0 && (() => {
                const selColor = colors[selectedColorIndex];
                return (
-                 <div style={{ marginTop: '8px', padding: '8px 12px', backgroundColor: '#fff', border: '2px solid #667eea', borderRadius: '6px', display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                 <div style={{ marginTop: '8px', padding: '8px 12px', backgroundColor: '#1e1e3a', border: '2px solid #667eea', borderRadius: '6px', display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
                    <span style={{ fontSize: '12px', color: '#667eea', fontWeight: 'bold', whiteSpace: 'nowrap' }}>↑ Click preview to pick</span>
                    <div style={{ width: '32px', height: '32px', backgroundColor: selColor?.hex ?? '#000', border: '2px solid #333', borderRadius: '4px', flexShrink: 0 }} />
                    <input
@@ -1647,13 +1819,13 @@ function App() {
                      style={{ width: '48px', height: '32px', padding: '0', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer' }}
                      title="Change colour"
                    />
-                   <span style={{ fontSize: '12px', color: '#555', fontFamily: 'monospace' }}>{selColor?.hex ?? ''}</span>
+                   <span style={{ fontSize: '12px', color: '#aaa', fontFamily: 'monospace' }}>{selColor?.hex ?? ''}</span>
                    <span style={{ fontSize: '11px', color: '#aaa' }}>Layer {selectedColorIndex + 1}</span>
                  </div>
                );
              })()}
              {stencilCanvases.length > 0 && (
-               <div style={{ marginTop: '10px', padding: '10px 12px', backgroundColor: '#f8f9fa', border: '1px solid #dee2e6', borderRadius: '6px' }}>
+               <div style={{ marginTop: '10px', padding: '10px 12px', backgroundColor: '#252525', border: '1px solid #333', borderRadius: '6px' }}>
                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                    <label style={{ fontSize: '13px', fontWeight: 'bold', whiteSpace: 'nowrap' }}>
                      Absorb islands ≤ {islandCleanupSize === 0 ? 'Off' : `${islandCleanupSize}px`}
@@ -1667,7 +1839,7 @@ function App() {
                    <div style={{ display: 'flex', gap: '3px', flexWrap: 'wrap' }}>
                      {[0,1,2,4,8,16,32,64,128,256,512,1024].map(v => (
                        <button key={v} onClick={() => setIslandCleanupSize(v)}
-                         style={{ padding: '2px 6px', fontSize: '11px', border: '1px solid #ccc', borderRadius: '3px', cursor: 'pointer', backgroundColor: islandCleanupSize === v ? '#667eea' : '#fff', color: islandCleanupSize === v ? 'white' : '#333' }}>
+                         style={{ padding: '2px 6px', fontSize: '11px', border: '1px solid #444', borderRadius: '3px', cursor: 'pointer', backgroundColor: islandCleanupSize === v ? '#667eea' : '#2e2e2e', color: islandCleanupSize === v ? 'white' : '#ccc' }}>
                          {v === 0 ? 'Off' : v}
                        </button>
                      ))}
@@ -1675,18 +1847,63 @@ function App() {
                  </div>
                </div>
              )}
+
+             {/* ── Active colour swatches — directly under preview ────────────────── */}
+             {colors.length > 0 && (
+               <div style={{ marginTop: '14px', padding: '12px', backgroundColor: '#1e1e1e', border: '1px solid #333', borderRadius: '8px' }}>
+                 <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#888', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px' }}>
+                   Active Colours — click swatch to swap colour instantly
+                 </div>
+                 <div style={{ display: 'flex', gap: '9px', flexWrap: 'wrap', marginBottom: '10px', alignItems: 'flex-start' }}>
+                   {colors.map((color, index) => (
+                     <div key={index} onClick={() => setSelectedColorIndex(index)} title={`${color.hex} — click to swap colour instantly`}
+                       style={{ position: 'relative', padding: '5px', border: index === selectedColorIndex ? '2px solid #a78bfa' : '1px solid #3a3a3a', borderRadius: '5px', cursor: 'pointer', backgroundColor: '#252525' }}>
+                       <button onClick={(e) => { e.stopPropagation(); handleDeleteColor(index); }} title="Remove this colour"
+                         style={{ position: 'absolute', top: '-8px', right: '-8px', width: '17px', height: '17px', background: '#c0392b', color: 'white', border: 'none', borderRadius: '50%', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '11px', zIndex: 2, boxShadow: '0 1px 4px rgba(0,0,0,0.6)', padding: 0, lineHeight: 1 }}>×</button>
+                       <div style={{ position: 'relative', width: '42px', height: '42px' }}>
+                         <div style={{ width: '42px', height: '42px', backgroundColor: color.hex, outline: '1px solid rgba(255,255,255,0.12)' }} />
+                         <input type="color" value={color.hex} onClick={(e) => e.stopPropagation()}
+                           onChange={(e) => {
+                             setSelectedColorIndex(index);
+                             colorsEditedRef.current = true;
+                             const rgb = hexToRgb(e.target.value);
+                             const next = [...colors];
+                             next[index] = { ...next[index], hex: e.target.value, rgb };
+                             setColors(next);
+                             const cv = stencilCanvases[index]?.canvas;
+                             if (cv) { const cx = cv.getContext('2d'); if (cx) { const id = cx.getImageData(0, 0, cv.width, cv.height); const dd = id.data; const [nr, ng, nb] = rgb; for (let pi = 0; pi < cv.width * cv.height; pi++) { if (dd[pi * 4 + 3] >= 128) { dd[pi * 4] = nr; dd[pi * 4 + 1] = ng; dd[pi * 4 + 2] = nb; } } cx.putImageData(id, 0, 0); setStencilCanvases(prev => [...prev]); } }
+                           }}
+                           title="Swap this colour — all pixels update instantly"
+                           style={{ position: 'absolute', inset: 0, opacity: 0, width: '100%', height: '100%', cursor: 'pointer', padding: 0, border: 'none' }}
+                         />
+                       </div>
+                       <div style={{ fontSize: '9px', textAlign: 'center', color: '#888', marginTop: '3px' }}>{color.hex}</div>
+                     </div>
+                   ))}
+                   <button onClick={handleAddColor} title="Add a new colour"
+                     style={{ width: '56px', minHeight: '76px', border: '1px dashed #555', borderRadius: '5px', background: 'transparent', color: '#667eea', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: '2px' }}>
+                     <span style={{ fontSize: '24px', lineHeight: 1 }}>+</span>
+                     <span style={{ fontSize: '9px', color: '#aaa' }}>Add</span>
+                   </button>
+                 </div>
+                 <button onClick={handleResetColors}
+                   style={{ padding: '6px 16px', background: 'linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontFamily: "'Bangers', cursive", fontSize: '16px', letterSpacing: '1px' }}>
+                   Reset Colors
+                 </button>
+               </div>
+             )}
            </div>
          </div>
 
          {/* ── SVG Vector Preview ───────────────────────────────────────────── */}
          {displayStencils.length > 0 && (
-           <div style={{ marginTop: '20px', padding: '16px', backgroundColor: '#f8f9fa', border: '1px solid #dee2e6', borderRadius: '6px' }}>
+           <div style={{ marginTop: '20px', padding: '16px', backgroundColor: '#252525', border: '1px solid #333', borderRadius: '8px' }}>
              <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '12px', flexWrap: 'wrap' }}>
                <h2 style={{ margin: 0 }}>SVG Vector Preview</h2>
                <button
                  onClick={buildSVGPreview}
                  disabled={svgPreviewBuilding}
-                 style={{ padding: '7px 18px', backgroundColor: svgPreviewBuilding ? '#aaa' : '#667eea', color: 'white', border: 'none', borderRadius: '5px', cursor: svgPreviewBuilding ? 'default' : 'pointer', fontWeight: 'bold', fontSize: '13px' }}
+                 style={{ padding: '9px 20px', background: svgPreviewBuilding ? '#444' : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', color: 'white', border: 'none', borderRadius: '5px', cursor: svgPreviewBuilding ? 'default' : 'pointer', fontFamily: "'Bangers', cursive", fontSize: '17px', letterSpacing: '1px' }}
                >
                  {svgPreviewBuilding ? 'Tracing…' : svgPreviewContent ? 'Re-trace' : 'Trace All Layers'}
                </button>
@@ -1700,7 +1917,7 @@ function App() {
                        if (svgStr) downloadSVG(svgStr, `stencil-${i + 1}-${colorHex.replace('#', '')}.svg`);
                      }
                    }}
-                   style={{ padding: '7px 18px', backgroundColor: '#27ae60', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold', fontSize: '13px' }}
+                   style={{ padding: '9px 20px', background: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)', color: '#051a05', border: 'none', borderRadius: '5px', cursor: 'pointer', fontFamily: "'Bangers', cursive", fontSize: '17px', letterSpacing: '1px' }}
                  >
                    Download All SVGs
                  </button>
@@ -1708,7 +1925,7 @@ function App() {
                <span style={{ fontSize: '12px', color: '#888' }}>Bezier-fitted vector paths via Potrace — all visible layers composited</span>
              </div>
              {svgPreviewContent ? (
-               <div style={{ border: '1px solid #ccc', borderRadius: '4px', overflow: 'auto', backgroundColor: 'white', maxHeight: '680px' }}>
+               <div style={{ border: '1px solid #333', borderRadius: '4px', overflow: 'auto', backgroundColor: '#1a1a1a', maxHeight: '680px' }}>
                  <div
                    style={{ width: '100%' }}
                    dangerouslySetInnerHTML={{ __html: svgPreviewContent
@@ -1718,7 +1935,7 @@ function App() {
                  />
                </div>
              ) : (
-               <div style={{ padding: '24px', textAlign: 'center', color: '#aaa', border: '1px dashed #ccc', borderRadius: '4px', backgroundColor: 'white' }}>
+               <div style={{ padding: '24px', textAlign: 'center', color: '#555', border: '1px dashed #444', borderRadius: '4px', backgroundColor: '#1a1a1a' }}>
                  Click “Trace All Layers” to generate a clean vector SVG with smooth Bezier curves
                </div>
              )}
@@ -1726,11 +1943,11 @@ function App() {
          )}
 
          <div style={{ marginTop: '20px' }}>
-           <h2>Color Palette</h2>
+           <h2>Palette Presets</h2>
 
            {/* ── Palette presets ─────────────────────────────── */}
-           <div style={{ marginBottom: '16px', padding: '12px', backgroundColor: '#f8f9fa', border: '1px solid #dee2e6', borderRadius: '6px' }}>
-             <div style={{ fontSize: '13px', fontWeight: 'bold', marginBottom: '10px', color: '#444' }}>Palette Source</div>
+           <div style={{ marginBottom: '16px', padding: '12px', backgroundColor: '#252525', border: '1px solid #333', borderRadius: '8px' }}>
+             <div style={{ fontSize: '13px', fontWeight: 'bold', marginBottom: '10px', color: '#ccc', textTransform: 'uppercase', letterSpacing: '1px' }}>Palette Source</div>
 
              {/* Group labels + preset buttons */}
              {(['Retro', 'Pixel Art', 'Stencil'] as const).map(group => (
@@ -1744,10 +1961,10 @@ function App() {
                        title={`${name} (${pColors.length} colours)`}
                        style={{
                          padding: '4px 6px',
-                         border: selectedPalette === name ? '2px solid #667eea' : '1px solid #ccc',
+                         border: selectedPalette === name ? '2px solid #667eea' : '1px solid #3a3a3a',
                          borderRadius: '5px',
                          cursor: 'pointer',
-                         backgroundColor: selectedPalette === name ? '#eef0ff' : 'white',
+                         backgroundColor: selectedPalette === name ? '#2a2f52' : '#2a2a2a',
                        }}
                      >
                        <div style={{ display: 'flex', gap: '1px', marginBottom: '3px' }}>
@@ -1756,7 +1973,7 @@ function App() {
                          ))}
                          {pColors.length > 12 && <div style={{ width: '8px', height: '8px', backgroundColor: '#eee', fontSize: '7px', lineHeight: '8px', textAlign: 'center', color: '#999' }}>+</div>}
                        </div>
-                       <div style={{ fontSize: '9px', whiteSpace: 'nowrap', textAlign: 'center', color: selectedPalette === name ? '#667eea' : '#555' }}>{name}</div>
+                       <div style={{ fontSize: '9px', whiteSpace: 'nowrap', textAlign: 'center', color: selectedPalette === name ? '#667eea' : '#aaa' }}>{name}</div>
                      </button>
                    ))}
                  </div>
@@ -1771,12 +1988,12 @@ function App() {
                    onClick={() => handlePresetPaletteSelect('auto')}
                    style={{
                      padding: '5px 14px',
-                     border: selectedPalette === 'auto' ? '2px solid #667eea' : '1px solid #ccc',
+                     border: selectedPalette === 'auto' ? '2px solid #667eea' : '1px solid #3a3a3a',
                      borderRadius: '5px',
                      cursor: 'pointer',
-                     backgroundColor: selectedPalette === 'auto' ? '#eef0ff' : 'white',
+                     backgroundColor: selectedPalette === 'auto' ? '#2a2f52' : '#2a2a2a',
                      fontWeight: selectedPalette === 'auto' ? 'bold' : 'normal',
-                     color: selectedPalette === 'auto' ? '#667eea' : '#555',
+                     color: selectedPalette === 'auto' ? '#667eea' : '#aaa',
                      fontSize: '12px',
                    }}
                  >
@@ -1791,8 +2008,8 @@ function App() {
                          onClick={() => handlePaletteSizeChange(size)}
                          style={{
                            padding: '3px 7px',
-                           backgroundColor: size === paletteSize ? '#667eea' : '#f0f0f0',
-                           color: size === paletteSize ? 'white' : '#333',
+                           backgroundColor: size === paletteSize ? '#667eea' : '#333',
+                           color: size === paletteSize ? 'white' : '#ccc',
                            border: 'none',
                            borderRadius: '3px',
                            cursor: 'pointer',
@@ -1807,53 +2024,6 @@ function App() {
                </div>
              </div>
            </div>
-
-           {/* ── Current palette swatches ─────────────────────── */}
-           <div style={{ display: 'flex', gap: '7px', flexWrap: 'wrap', marginBottom: '10px' }}>
-             {colors.map((color, index) => (
-               <div
-                 key={index}
-                 onClick={() => setSelectedColorIndex(index)}
-                 title={color.hex}
-                 style={{
-                   padding: '5px',
-                   border: index === selectedColorIndex ? '2px solid #333' : '1px solid #ccc',
-                   borderRadius: '5px',
-                   cursor: 'pointer',
-                   backgroundColor: '#fff',
-                 }}
-               >
-                 <div style={{ width: '38px', height: '38px', backgroundColor: color.hex, outline: '1px solid rgba(0,0,0,0.12)' }} />
-                 <div style={{ fontSize: '9px', textAlign: 'center', color: '#666', marginTop: '3px' }}>{color.hex}</div>
-               </div>
-             ))}
-           </div>
-
-           {colors.length > 0 && (
-             <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '10px' }}>
-               <label style={{ fontSize: '13px' }}>Edit selected:</label>
-               <input
-                 type="color"
-                 value={colors[selectedColorIndex]?.hex || '#000000'}
-                 onChange={(e) => handleColorPickerChange(e.target.value)}
-                 style={{ width: '50px', height: '28px' }}
-               />
-               <button
-                 onClick={handleResetColors}
-                 style={{
-                   padding: '4px 12px',
-                   backgroundColor: '#e74c3c',
-                   color: 'white',
-                   border: 'none',
-                   borderRadius: '4px',
-                   cursor: 'pointer',
-                   fontSize: '13px',
-                 }}
-               >
-                 Reset Colors
-               </button>
-             </div>
-           )}
          </div>
 
          {stencilCanvases.length > 0 && (() => {
@@ -1875,7 +2045,7 @@ function App() {
                {mergeSelection.size >= 2 && (
                  <button
                    onClick={handleMergeStencils}
-                   style={{ marginBottom: '12px', padding: '7px 20px', backgroundColor: '#e67e22', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold', fontSize: '14px' }}
+                   style={{ marginBottom: '12px', padding: '9px 22px', background: 'linear-gradient(135deg, #e67e22 0%, #f39c12 100%)', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', fontFamily: "'Bangers', cursive", fontSize: '18px', letterSpacing: '2px', boxShadow: '0 3px 12px rgba(230,126,34,0.45)' }}
                  >
                    Merge {mergeSelection.size} selected stencils
                  </button>
@@ -1886,7 +2056,7 @@ function App() {
                    const colorHex = colors[index]?.hex ?? '#000000';
                    const inMerge = mergeSelection.has(index);
                    return (
-                     <div key={index} style={{ border: inMerge ? '2px solid #e67e22' : stencilInfo.hasIslands ? '2px solid #f39c12' : '1px solid #ccc', padding: '10px', backgroundColor: 'white', minWidth: '220px' }}>
+                     <div key={index} style={{ border: inMerge ? '2px solid #e67e22' : stencilInfo.hasIslands ? '2px solid #f39c12' : '1px solid #333', padding: '10px', backgroundColor: '#252525', minWidth: '220px', borderRadius: '6px' }}>
                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
                          <input
                            type="checkbox"
@@ -1910,10 +2080,10 @@ function App() {
                            })}
                            title={visibleLayers.has(index) ? 'Hide in preview' : 'Show in preview'}
                            style={{
-                             marginLeft: 'auto', padding: '2px 8px', border: '1px solid #ccc',
+                             marginLeft: 'auto', padding: '2px 8px', border: '1px solid #444',
                              borderRadius: '4px', cursor: 'pointer', fontSize: '13px',
-                             backgroundColor: visibleLayers.has(index) ? '#eef0ff' : '#f5f5f5',
-                             color: visibleLayers.has(index) ? '#667eea' : '#aaa',
+                             backgroundColor: visibleLayers.has(index) ? '#1e1e3f' : '#333',
+                             color: visibleLayers.has(index) ? '#667eea' : '#666',
                              fontWeight: 'bold',
                            }}
                          >
@@ -1928,12 +2098,12 @@ function App() {
                        <img
                          src={stencilInfo.canvas.toDataURL('image/png')}
                          alt={`Stencil ${index + 1}`}
-                         style={{ width: '100%', height: 'auto', display: 'block', border: '1px solid #eee' }}
+                         style={{ width: '100%', height: 'auto', display: 'block', border: '1px solid #333' }}
                        />
                        <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
                          <button
                            onClick={() => downloadCanvasAsPNG(stencilInfo.canvas, `stencil-${index + 1}-${colorHex.replace('#', '')}.png`)}
-                           style={{ flex: 1, padding: '6px 0', backgroundColor: '#2ecc71', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold' }}
+                           style={{ flex: 1, padding: '7px 0', background: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)', color: '#031003', border: 'none', borderRadius: '4px', cursor: 'pointer', fontFamily: "'Bangers', cursive", fontSize: '16px', letterSpacing: '1px' }}
                          >
                            PNG
                          </button>
@@ -1942,7 +2112,7 @@ function App() {
                              const svgContent = await canvasToSVGPotrace(stencilInfo.canvas, colorHex);
                              if (svgContent) downloadSVG(svgContent, `stencil-${index + 1}-${colorHex.replace('#', '')}.svg`);
                            }}
-                           style={{ flex: 1, padding: '6px 0', backgroundColor: '#8e44ad', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold' }}
+                           style={{ flex: 1, padding: '7px 0', background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontFamily: "'Bangers', cursive", fontSize: '16px', letterSpacing: '1px' }}
                          >
                            SVG
                          </button>

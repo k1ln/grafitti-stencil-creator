@@ -3,7 +3,29 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Stencil Creator</title>
+  <title>Stenciltool.org — Multi-Layer Stencil Tool</title>
+  <link href="https://fonts.googleapis.com/css2?family=Bangers&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #1a1a1c;
+      color: #f0f0f0;
+      font-family: 'Inter', Arial, sans-serif;
+      min-height: 100vh;
+    }
+    #root {
+      min-height: 100vh;
+      background: #1a1a1c;
+    }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #111; }
+    ::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #666; }
+    input[type=range] { accent-color: #667eea; }
+    input[type=checkbox] { accent-color: #667eea; }
+  </style>
 </head>
 <body>
   <div id="root"></div>
