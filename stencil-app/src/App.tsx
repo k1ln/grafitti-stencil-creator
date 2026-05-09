@@ -162,7 +162,7 @@ const PRESET_PALETTES: Array<{ name: string; group: string; colors: ColorInfo[] 
 // ── Module-level canvas helpers ──────────────────────────────────────────────
 
 function countOpaquePx(canvas: HTMLCanvasElement): number {
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) return 0;
   const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
   let n = 0;
@@ -178,7 +178,7 @@ function countOpaquePx(canvas: HTMLCanvasElement): number {
 function canvasToSVGPotrace(canvas: HTMLCanvasElement, fillColor: string): Promise<string> {
   return new Promise(resolve => {
     const w = canvas.width, h = canvas.height;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if (!ctx || typeof (window as any).Potrace === 'undefined') { resolve(''); return; }
 
@@ -241,6 +241,42 @@ function otsuValue(hist: Uint32Array): number {
   return threshold;
 }
 
+// ── HSL colour helpers ─────────────────────────────────────────────────────
+function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0;
+  const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h /= 6;
+  }
+  return [h, s, l];
+}
+
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  let r: number, g: number, b: number;
+  if (s === 0) {
+    r = g = b = l;
+  } else {
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    const hue2rgb = (t: number): number => {
+      if (t < 0) t += 1; if (t > 1) t -= 1;
+      if (t < 1 / 6) return p + (q - p) * 6 * t;
+      if (t < 1 / 2) return q;
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+      return p;
+    };
+    r = hue2rgb(h + 1 / 3); g = hue2rgb(h); b = hue2rgb(h - 1 / 3);
+  }
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+
 function App() {
   const [originalImageData, setOriginalImageData] = useState<ImageData | null>(null);
   const [imageDimensions, setImageDimensions] = useState<{width: number, height: number} | null>(null);
@@ -265,6 +301,21 @@ function App() {
   const [selection, setSelection] = useState<{x: number, y: number, w: number, h: number} | null>(null);
   const [selectedPalette, setSelectedPalette] = useState<string>('auto');
   const [visibleLayers, setVisibleLayers] = useState<Set<number>>(new Set());
+  // ── Color effects ──────────────────────────────────────────────────────────
+  const [brightness, setBrightness] = useState(100);
+  const [saturation, setSaturation] = useState(100);
+  const [hue, setHue] = useState(0);
+  const [invertColors, setInvertColors] = useState(false);
+  // ── Background cutout ──────────────────────────────────────────────────────
+  const [editMode, setEditMode] = useState<'select' | 'erase' | 'wand'>('select');
+  const [brushSize, setBrushSize] = useState(20);
+  const [maskTolerance, setMaskTolerance] = useState(20);
+  const [hasMask, setHasMask] = useState(false);
+  const [eraseCursor, setEraseCursor] = useState<{cssX: number, cssY: number} | null>(null);
+  // ── Chroma key ─────────────────────────────────────────────────────────────
+  const [chromaKeyEnabled, setChromaKeyEnabled] = useState(false);
+  const [chromaColor, setChromaColor] = useState('#ffffff');
+  const [chromaTolerance, setChromaTolerance] = useState(30);
   const selectionDragRef = useRef<{startX: number, startY: number} | null>(null);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   
@@ -272,6 +323,8 @@ function App() {
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const rawImageRef = useRef<HTMLImageElement | null>(null);
+  const alphaMaskRef = useRef<Uint8ClampedArray | null>(null);
+  const isErasingRef = useRef(false);
 
   const rgbToHex = useCallback((r: number, g: number, b: number): string => {
     return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
@@ -448,12 +501,19 @@ function App() {
     return results;
   }, []);
 
-  // Apply contrast + blur + posterization to raw image, returns adjusted ImageData
-  const applyContrastAndBlur = useCallback((img: HTMLImageElement, contrastVal: number, simplifyVal: number, posterizeVal: number, width: number, height: number): ImageData => {
+  // Apply contrast + blur + posterization + color effects to raw image, returns adjusted ImageData.
+  // Pass mask=null to get the un-masked result (for storing in originalImageData);
+  // mask is applied separately for display and stencil generation.
+  const applyContrastAndBlur = useCallback((
+    img: HTMLImageElement, contrastVal: number, simplifyVal: number, posterizeVal: number,
+    width: number, height: number,
+    brightnessVal = 100, saturationVal = 100, hueVal = 0, invertVal = false,
+    chromaEnabled = false, chromaHex = '#ffffff', chromaTol = 30,
+  ): ImageData => {
     const scratch = document.createElement('canvas');
     scratch.width = width;
     scratch.height = height;
-    const scratchCtx = scratch.getContext('2d')!;
+    const scratchCtx = scratch.getContext('2d', { willReadFrequently: true })!;
 
     // Apply blur via CSS filter before drawing (simplify)
     if (simplifyVal > 0) {
@@ -484,6 +544,51 @@ function App() {
       }
     }
 
+    // Invert
+    if (invertVal) {
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] === 0) continue;
+        data[i] = 255 - data[i]; data[i + 1] = 255 - data[i + 1]; data[i + 2] = 255 - data[i + 2];
+      }
+    }
+
+    // Brightness + Saturation + Hue (single combined HSL pass)
+    if (brightnessVal !== 100 || saturationVal !== 100 || hueVal !== 0) {
+      const bf = brightnessVal / 100;
+      const sf = saturationVal / 100;
+      const hf = hueVal / 360;
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] === 0) continue;
+        let r = data[i], g = data[i + 1], b = data[i + 2];
+        if (brightnessVal !== 100) {
+          r = Math.max(0, Math.min(255, r * bf)) | 0;
+          g = Math.max(0, Math.min(255, g * bf)) | 0;
+          b = Math.max(0, Math.min(255, b * bf)) | 0;
+        }
+        if (saturationVal !== 100 || hueVal !== 0) {
+          let [h, s, l] = rgbToHsl(r, g, b);
+          if (saturationVal !== 100) s = Math.max(0, Math.min(1, s * sf));
+          if (hueVal !== 0) h = ((h + hf) % 1 + 1) % 1;
+          [r, g, b] = hslToRgb(h, s, l);
+        }
+        data[i] = r; data[i + 1] = g; data[i + 2] = b;
+      }
+    }
+
+    // Chroma key – make pixels within Lab tolerance of chromaHex transparent
+    if (chromaEnabled && chromaHex) {
+      const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(chromaHex);
+      if (m) {
+        const targetLab = rgbToLab(parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16));
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i + 3] === 0) continue;
+          const pLab = rgbToLab(data[i], data[i + 1], data[i + 2]);
+          const dE = Math.sqrt((pLab[0] - targetLab[0]) ** 2 + (pLab[1] - targetLab[1]) ** 2 + (pLab[2] - targetLab[2]) ** 2);
+          if (dE <= chromaTol) data[i + 3] = 0;
+        }
+      }
+    }
+
     scratchCtx.putImageData(imageData, 0, 0);
     return scratchCtx.getImageData(0, 0, width, height);
   }, []);
@@ -492,7 +597,7 @@ function App() {
   // then draw each bridge with configurable thickness via square dilation.
   // Islands smaller than minIslandPx are filled (erased) instead of bridged.
   const bridgeIslands = useCallback((canvas: HTMLCanvasElement, bridgeHalfW: number, minIslandPx: number): void => {
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
 
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -640,7 +745,7 @@ function App() {
   // Fills small gaps and holes inside color regions, producing clean cuttable shapes
   const morphologicalClose = useCallback((canvas: HTMLCanvasElement, radius: number, color: ColorInfo): void => {
     if (radius <= 0) return;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
 
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -715,7 +820,7 @@ function App() {
   // Remove colored blobs smaller than minSize pixels (sets them transparent)
   const removeSmallRegions = useCallback((canvas: HTMLCanvasElement, minSize: number): void => {
     if (minSize <= 0) return;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
 
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -769,7 +874,7 @@ function App() {
 
   // Detect islands (white areas not connected to canvas boundary)
   const detectIslands = useCallback((canvas: HTMLCanvasElement): boolean => {
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return false;
 
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -843,7 +948,7 @@ function App() {
 
     // Read pixel data once per stencil
     const pixelDatas: Uint8ClampedArray[] = infos.map(info =>
-      info.canvas.getContext('2d')!.getImageData(0, 0, width, height).data
+      info.canvas.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, width, height).data
     );
 
     // Build pixel ownership map: which stencil index owns each pixel? -1 = background
@@ -1044,7 +1149,7 @@ function App() {
    * Borderline pixels are set transparent → sharper, cleaner stencil edges.
    */
   const otsuSharpenLayer = useCallback((canvas: HTMLCanvasElement, color: ColorInfo): void => {
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
     const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = imgData.data;
@@ -1088,7 +1193,7 @@ function App() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
 
     let width = img.width;
@@ -1110,15 +1215,21 @@ function App() {
     rawImageRef.current = img;
     setImageDimensions({width, height});
 
+    // Reset mask and edit mode for new image
+    alphaMaskRef.current = new Uint8ClampedArray(width * height).fill(255);
+    setHasMask(false);
+    setEditMode('select');
+
     // Apply adjustments and display on canvas
-    const adjustedData = applyContrastAndBlur(img, contrast, simplify, posterize, width, height);
+    const adjustedData = applyContrastAndBlur(img, contrast, simplify, posterize, width, height,
+      brightness, saturation, hue, invertColors, chromaKeyEnabled, chromaColor, chromaTolerance);
     ctx.putImageData(adjustedData, 0, 0);
     setOriginalImageData(adjustedData);
 
     setSelectedPalette('auto');
     const extractedColors = extractColors(adjustedData, paletteSize);
     setColors(extractedColors);
-    }, [extractColors, paletteSize, contrast, simplify, posterize, applyContrastAndBlur]);
+    }, [extractColors, paletteSize, contrast, simplify, posterize, brightness, saturation, hue, invertColors, chromaKeyEnabled, chromaColor, chromaTolerance, applyContrastAndBlur]);
 
   // Convert mouse event position to canvas pixel coordinates
   const canvasEventToPixel = useCallback((e: React.MouseEvent): {x: number, y: number} | null => {
@@ -1133,14 +1244,129 @@ function App() {
     };
   }, [imageDimensions]);
 
+  // ── Erase brush: paint transparency directly on the canvas + update alpha mask ──
+  const paintErase = useCallback((imgX: number, imgY: number, restore = false) => {
+    if (!imageDimensions || !canvasRef.current) return;
+    const { width, height } = imageDimensions;
+    if (!alphaMaskRef.current) alphaMaskRef.current = new Uint8ClampedArray(width * height).fill(255);
+    const ctx = canvasRef.current.getContext('2d', { willReadFrequently: true })!;
+    const imgData = ctx.getImageData(0, 0, width, height);
+    const data = imgData.data;
+    const r = Math.ceil(brushSize);
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy > r * r) continue;
+        const nx = imgX + dx, ny = imgY + dy;
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+        const pi = ny * width + nx;
+        if (restore) {
+          alphaMaskRef.current[pi] = 255;
+          // We can't restore colour info from a transparent pixel — caller must trigger full redraw
+        } else {
+          alphaMaskRef.current[pi] = 0;
+          data[pi * 4 + 3] = 0;
+        }
+      }
+    }
+    if (restore) {
+      // Need full pipeline redraw to show restored pixels — handled via hasMask toggle
+    } else {
+      ctx.putImageData(imgData, 0, 0);
+    }
+    setHasMask(true);
+  }, [imageDimensions, brushSize]);
+
+  // ── Magic wand: flood-fill from clicked pixel, erasing similar connected region ──
+  const handleMagicWandClick = useCallback((imgX: number, imgY: number) => {
+    if (!imageDimensions || !canvasRef.current) return;
+    const { width, height } = imageDimensions;
+    if (!alphaMaskRef.current) alphaMaskRef.current = new Uint8ClampedArray(width * height).fill(255);
+    const ctx = canvasRef.current.getContext('2d', { willReadFrequently: true })!;
+    const imgData = ctx.getImageData(0, 0, width, height);
+    const data = imgData.data;
+    const startPx = imgY * width + imgX;
+    if (data[startPx * 4 + 3] === 0) return; // clicking transparent = no-op
+    const seedLab = rgbToLab(data[startPx * 4], data[startPx * 4 + 1], data[startPx * 4 + 2]);
+    const visited = new Uint8Array(width * height);
+    const queue = [startPx];
+    visited[startPx] = 1;
+    let head = 0;
+    while (head < queue.length) {
+      const px = queue[head++];
+      alphaMaskRef.current[px] = 0;
+      data[px * 4 + 3] = 0;
+      const x = px % width, y = (px / width) | 0;
+      const neighbors = [x > 0 ? px - 1 : -1, x < width - 1 ? px + 1 : -1, y > 0 ? px - width : -1, y < height - 1 ? px + width : -1];
+      for (const nb of neighbors) {
+        if (nb < 0 || visited[nb] || data[nb * 4 + 3] === 0) continue;
+        const nLab = rgbToLab(data[nb * 4], data[nb * 4 + 1], data[nb * 4 + 2]);
+        const dE = Math.sqrt((nLab[0] - seedLab[0]) ** 2 + (nLab[1] - seedLab[1]) ** 2 + (nLab[2] - seedLab[2]) ** 2);
+        if (dE <= maskTolerance) { visited[nb] = 1; queue.push(nb); }
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+    setHasMask(true);
+  }, [imageDimensions, maskTolerance]);
+
+  // ── Auto remove background: fuzzy flood-fill from all image edges ──
+  const autoRemoveBackground = useCallback(() => {
+    if (!imageDimensions || !canvasRef.current) return;
+    const { width, height } = imageDimensions;
+    if (!alphaMaskRef.current) alphaMaskRef.current = new Uint8ClampedArray(width * height).fill(255);
+    const ctx = canvasRef.current.getContext('2d', { willReadFrequently: true })!;
+    const imgData = ctx.getImageData(0, 0, width, height);
+    const data = imgData.data;
+    const visited = new Uint8Array(width * height);
+    const queue: number[] = [];
+    const tryAdd = (px: number) => { if (!visited[px] && data[px * 4 + 3] > 0) { visited[px] = 1; queue.push(px); } };
+    for (let x = 0; x < width; x++) { tryAdd(x); tryAdd((height - 1) * width + x); }
+    for (let y = 1; y < height - 1; y++) { tryAdd(y * width); tryAdd(y * width + width - 1); }
+    let head = 0;
+    while (head < queue.length) {
+      const px = queue[head++];
+      alphaMaskRef.current[px] = 0;
+      data[px * 4 + 3] = 0;
+      const x = px % width, y = (px / width) | 0;
+      const pLab = rgbToLab(data[px * 4], data[px * 4 + 1], data[px * 4 + 2]);
+      const neighbors = [x > 0 ? px - 1 : -1, x < width - 1 ? px + 1 : -1, y > 0 ? px - width : -1, y < height - 1 ? px + width : -1];
+      for (const nb of neighbors) {
+        if (nb < 0 || visited[nb] || data[nb * 4 + 3] === 0) continue;
+        const nLab = rgbToLab(data[nb * 4], data[nb * 4 + 1], data[nb * 4 + 2]);
+        const dE = Math.sqrt((pLab[0] - nLab[0]) ** 2 + (pLab[1] - nLab[1]) ** 2 + (pLab[2] - nLab[2]) ** 2);
+        if (dE <= maskTolerance) { visited[nb] = 1; queue.push(nb); }
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+    setHasMask(true);
+  }, [imageDimensions, maskTolerance]);
+
   const handleCanvasMouseDown = useCallback((e: React.MouseEvent) => {
     const pt = canvasEventToPixel(e);
     if (!pt) return;
-    selectionDragRef.current = { startX: pt.x, startY: pt.y };
-    setSelection({ x: pt.x, y: pt.y, w: 0, h: 0 });
-  }, [canvasEventToPixel]);
+    if (editMode === 'select') {
+      selectionDragRef.current = { startX: pt.x, startY: pt.y };
+      setSelection({ x: pt.x, y: pt.y, w: 0, h: 0 });
+    } else if (editMode === 'erase') {
+      isErasingRef.current = true;
+      paintErase(pt.x, pt.y);
+    } else if (editMode === 'wand') {
+      handleMagicWandClick(pt.x, pt.y);
+    }
+  }, [canvasEventToPixel, editMode, paintErase, handleMagicWandClick]);
 
   const handleCanvasMouseMove = useCallback((e: React.MouseEvent) => {
+    if (editMode === 'erase') {
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const rect = canvas.getBoundingClientRect();
+        setEraseCursor({ cssX: e.clientX - rect.left, cssY: e.clientY - rect.top });
+      }
+      if (isErasingRef.current) {
+        const pt = canvasEventToPixel(e);
+        if (pt) paintErase(pt.x, pt.y);
+      }
+      return;
+    }
     if (!selectionDragRef.current) return;
     const pt = canvasEventToPixel(e);
     if (!pt) return;
@@ -1151,10 +1377,17 @@ function App() {
       w: Math.abs(pt.x - startX),
       h: Math.abs(pt.y - startY),
     });
-  }, [canvasEventToPixel]);
+  }, [canvasEventToPixel, editMode, paintErase]);
 
   const handleCanvasMouseUp = useCallback(() => {
     selectionDragRef.current = null;
+    isErasingRef.current = false;
+  }, []);
+
+  const handleCanvasMouseLeave = useCallback(() => {
+    selectionDragRef.current = null;
+    isErasingRef.current = false;
+    setEraseCursor(null);
   }, []);
 
   const handleCropToSelection = useCallback(() => {
@@ -1261,34 +1494,60 @@ function App() {
   const previewAdjustments = useCallback(() => {
     if (!rawImageRef.current || !imageDimensions || !canvasRef.current) return;
     const {width, height} = imageDimensions;
-    const adjustedData = applyContrastAndBlur(rawImageRef.current, contrast, simplify, posterize, width, height);
-    const ctx = canvasRef.current.getContext('2d')!;
-    ctx.putImageData(adjustedData, 0, 0);
-    }, [imageDimensions, contrast, simplify, posterize, applyContrastAndBlur]);
+    const adjustedData = applyContrastAndBlur(rawImageRef.current, contrast, simplify, posterize, width, height,
+      brightness, saturation, hue, invertColors, chromaKeyEnabled, chromaColor, chromaTolerance);
+    // Apply alpha mask on top for display
+    let displayData: ImageData = adjustedData;
+    if (alphaMaskRef.current) {
+      const masked = new Uint8ClampedArray(adjustedData.data);
+      const m = alphaMaskRef.current;
+      for (let pi = 0; pi < m.length; pi++) if (m[pi] === 0) masked[pi * 4 + 3] = 0;
+      displayData = new ImageData(masked, width, height);
+    }
+    canvasRef.current.getContext('2d')!.putImageData(displayData, 0, 0);
+    }, [imageDimensions, contrast, simplify, posterize, brightness, saturation, hue, invertColors, chromaKeyEnabled, chromaColor, chromaTolerance, applyContrastAndBlur]);
+
+  // Clear the alpha mask and redraw the full pipeline
+  const clearAlphaMask = useCallback(() => {
+    if (!imageDimensions) return;
+    const { width, height } = imageDimensions;
+    alphaMaskRef.current = new Uint8ClampedArray(width * height).fill(255);
+    setHasMask(false);
+    previewAdjustments();
+  }, [imageDimensions, previewAdjustments]);
 
   // Apply adjustments and regenerate stencils
   const handleApplyAdjustments = useCallback(() => {
     if (!rawImageRef.current || !imageDimensions) return;
     const {width, height} = imageDimensions;
-    const adjustedData = applyContrastAndBlur(rawImageRef.current, contrast, simplify, posterize, width, height);
-    const ctx = canvasRef.current?.getContext('2d');
-    if (ctx) ctx.putImageData(adjustedData, 0, 0);
+    // adjustedData has all color effects applied but NO mask (mask applied separately below)
+    const adjustedData = applyContrastAndBlur(rawImageRef.current, contrast, simplify, posterize, width, height,
+      brightness, saturation, hue, invertColors, chromaKeyEnabled, chromaColor, chromaTolerance);
     setOriginalImageData(adjustedData);
+    // Build masked copy for display + stencil generation
+    let stencilData: ImageData = adjustedData;
+    if (alphaMaskRef.current) {
+      const masked = new Uint8ClampedArray(adjustedData.data);
+      const m = alphaMaskRef.current;
+      for (let pi = 0; pi < m.length; pi++) if (m[pi] === 0) masked[pi * 4 + 3] = 0;
+      stencilData = new ImageData(masked, width, height);
+    }
+    const ctx = canvasRef.current?.getContext('2d', { willReadFrequently: true });
+    if (ctx) ctx.putImageData(stencilData, 0, 0);
     let colorSet: ColorInfo[];
     if (selectedPalette === 'auto' && !colorsEditedRef.current) {
-      colorSet = extractColors(adjustedData, paletteSize);
+      colorSet = extractColors(stencilData, paletteSize);
       setColors(colorSet);
     } else {
       colorSet = colors; // keep manually edited or preset palette
     }
-    // Run generation immediately with the freshly computed data (avoids stale state)
-    runGeneration(adjustedData, colorSet, width, height);
-    }, [imageDimensions, contrast, simplify, posterize, applyContrastAndBlur, extractColors, paletteSize, runGeneration, selectedPalette, colors]);
+    runGeneration(stencilData, colorSet, width, height);
+    }, [imageDimensions, contrast, simplify, posterize, brightness, saturation, hue, invertColors, chromaKeyEnabled, chromaColor, chromaTolerance, applyContrastAndBlur, extractColors, paletteSize, runGeneration, selectedPalette, colors]);
 
   const updatePreview = useCallback(() => {
     if (!originalImageData || colors.length === 0 || !imageDimensions || !previewCanvasRef.current) return;
     const {width, height} = imageDimensions;
-    const previewCtx = previewCanvasRef.current.getContext('2d');
+    const previewCtx = previewCanvasRef.current.getContext('2d', { willReadFrequently: true });
     if (!previewCtx) return;
 
     // Set canvas pixel dimensions to match image
@@ -1319,7 +1578,7 @@ function App() {
     const cy = Math.min(imageDimensions.height - 1, Math.max(0, Math.floor((e.clientY - rect.top)   * scaleY)));
     for (let i = displayStencils.length - 1; i >= 0; i--) {
       if (!visibleLayers.has(i)) continue;
-      const ctx2 = displayStencils[i].canvas.getContext('2d');
+      const ctx2 = displayStencils[i].canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx2) continue;
       const pixel = ctx2.getImageData(cx, cy, 1, 1).data;
       if (pixel[3] >= 128) { setSelectedColorIndex(i); return; }
@@ -1365,7 +1624,7 @@ function App() {
       // Remap all pixels on this stencil layer to the new colour — instant swap, no re-render
       const cv = stencilCanvases[idx]?.canvas;
       if (cv) {
-        const cx = cv.getContext('2d');
+        const cx = cv.getContext('2d', { willReadFrequently: true });
         if (cx) {
           const id = cx.getImageData(0, 0, cv.width, cv.height);
           const dd = id.data;
@@ -1466,12 +1725,12 @@ function App() {
     // Union the alpha channels — a pixel is opaque if opaque in any source layer
     const merged = document.createElement('canvas');
     merged.width = width; merged.height = height;
-    const mergedCtx = merged.getContext('2d')!;
+    const mergedCtx = merged.getContext('2d', { willReadFrequently: true })!;
     const mergedData = mergedCtx.createImageData(width, height);
     for (const idx of selected) {
       const src = stencilCanvases[idx]?.canvas;
       if (!src) continue;
-      const srcData = src.getContext('2d')!.getImageData(0, 0, width, height).data;
+      const srcData = src.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, width, height).data;
       for (let pi = 0; pi < width * height; pi++) {
         if (srcData[pi * 4 + 3] >= 128) {
           mergedData.data[pi * 4]     = avgR;
@@ -1691,6 +1950,83 @@ function App() {
                  </button>
                </div>
              </div>
+
+             {/* ── Color Effects row ──────────────────────────────────────────── */}
+             <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: '1px solid #3a3a3a' }}>
+               <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#888', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px' }}>
+                 Color Effects — applied live, click Apply to regenerate stencils
+               </div>
+               <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                 <div style={{ flex: 1, minWidth: '160px' }}>
+                   <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px', fontWeight: 'bold' }}>
+                     Brightness: {brightness}%
+                   </label>
+                   <input type="range" min={10} max={300} value={brightness}
+                     onChange={(e) => setBrightness(Number(e.target.value))} style={{ width: '100%' }} />
+                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#888' }}>
+                     <span>Dark</span><span>Normal</span><span>Bright</span>
+                   </div>
+                 </div>
+                 <div style={{ flex: 1, minWidth: '160px' }}>
+                   <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px', fontWeight: 'bold' }}>
+                     Saturation: {saturation}%
+                   </label>
+                   <input type="range" min={0} max={300} value={saturation}
+                     onChange={(e) => setSaturation(Number(e.target.value))} style={{ width: '100%' }} />
+                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#888' }}>
+                     <span>Grayscale</span><span>Normal</span><span>Vivid</span>
+                   </div>
+                 </div>
+                 <div style={{ flex: 1, minWidth: '160px' }}>
+                   <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px', fontWeight: 'bold' }}>
+                     Hue shift: {hue > 0 ? '+' : ''}{hue}°
+                   </label>
+                   <input type="range" min={-180} max={180} value={hue}
+                     onChange={(e) => setHue(Number(e.target.value))} style={{ width: '100%' }} />
+                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#888' }}>
+                     <span>-180°</span><span>0°</span><span>+180°</span>
+                   </div>
+                 </div>
+                 <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                   <button
+                     onClick={() => setInvertColors(v => !v)}
+                     style={{ padding: '8px 18px', background: invertColors ? 'linear-gradient(135deg, #c0392b 0%, #e74c3c 100%)' : '#3a3a3a', color: 'white', border: invertColors ? '2px solid #e74c3c' : '1px solid #555', borderRadius: '6px', cursor: 'pointer', fontFamily: "'Bangers', cursive", fontSize: '17px', letterSpacing: '1px' }}
+                   >
+                     {invertColors ? '⬛ INVERTED' : '⬜ Invert'}
+                   </button>
+                   <button
+                     onClick={() => { setBrightness(100); setSaturation(100); setHue(0); setInvertColors(false); setChromaKeyEnabled(false); }}
+                     style={{ padding: '5px 12px', background: 'transparent', color: '#888', border: '1px solid #444', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}
+                   >
+                     Reset effects
+                   </button>
+                 </div>
+               </div>
+
+               {/* Chroma key */}
+               <div style={{ marginTop: '12px', padding: '10px 12px', backgroundColor: '#1e1e1e', border: `1px solid ${chromaKeyEnabled ? '#e74c3c' : '#333'}`, borderRadius: '6px' }}>
+                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                   <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '13px' }}>
+                     <input type="checkbox" checked={chromaKeyEnabled} onChange={(e) => setChromaKeyEnabled(e.target.checked)} style={{ width: '15px', height: '15px' }} />
+                     Transparent Color (Chroma Key)
+                   </label>
+                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                     <span style={{ fontSize: '12px', color: '#aaa' }}>Color:</span>
+                     <input type="color" value={chromaColor} onChange={(e) => setChromaColor(e.target.value)}
+                       style={{ width: '40px', height: '26px', padding: 0, border: '1px solid #555', borderRadius: '3px', cursor: 'pointer' }} />
+                     <span style={{ fontSize: '11px', color: '#777', fontFamily: 'monospace' }}>{chromaColor}</span>
+                   </div>
+                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: 1, minWidth: '140px' }}>
+                     <span style={{ fontSize: '12px', color: '#aaa', whiteSpace: 'nowrap' }}>Tolerance: {chromaTolerance}</span>
+                     <input type="range" min={1} max={80} value={chromaTolerance}
+                       onChange={(e) => setChromaTolerance(Number(e.target.value))} style={{ flex: 1 }} />
+                   </div>
+                   <span style={{ fontSize: '11px', color: '#666' }}>
+                     Removes pixels matching the chosen color. Eyedropper: Ctrl+click or enable then click canvas.
+                   </span>
+                 </div>
+               </div>
+             </div>
            </div>
          )}
 
@@ -1727,17 +2063,18 @@ function App() {
              <h2>Original Image</h2>
              <div
                ref={canvasContainerRef}
-               style={{ position: 'relative', display: 'inline-block', width: '100%', cursor: imageDimensions ? 'crosshair' : 'default' }}
+               style={{ position: 'relative', display: 'inline-block', width: '100%', cursor: editMode === 'erase' ? 'none' : imageDimensions ? 'crosshair' : 'default' }}
                onMouseDown={handleCanvasMouseDown}
                onMouseMove={handleCanvasMouseMove}
                onMouseUp={handleCanvasMouseUp}
-               onMouseLeave={handleCanvasMouseUp}
+               onMouseLeave={handleCanvasMouseLeave}
              >
                <canvas
                  ref={canvasRef}
                  style={{ border: '1px solid #3a3a3a', width: '100%', height: 'auto', display: 'block', userSelect: 'none' }}
                />
-               {selection && selection.w > 2 && selection.h > 2 && imageDimensions && (() => {
+               {/* Selection rect overlay */}
+               {editMode === 'select' && selection && selection.w > 2 && selection.h > 2 && imageDimensions && (() => {
                  const canvas = canvasRef.current;
                  if (!canvas) return null;
                  const rect = canvas.getBoundingClientRect();
@@ -1758,8 +2095,30 @@ function App() {
                    }} />
                  );
                })()}
+               {/* Erase brush cursor overlay */}
+               {editMode === 'erase' && eraseCursor && imageDimensions && (() => {
+                 const canvas = canvasRef.current;
+                 if (!canvas) return null;
+                 const rect = canvas.getBoundingClientRect();
+                 const scaleX = rect.width / imageDimensions.width;
+                 const displayR = Math.max(4, brushSize * scaleX);
+                 return (
+                   <div style={{
+                     position: 'absolute',
+                     left: eraseCursor.cssX - displayR,
+                     top: eraseCursor.cssY - displayR,
+                     width: displayR * 2,
+                     height: displayR * 2,
+                     border: '2px solid rgba(255,80,80,0.9)',
+                     borderRadius: '50%',
+                     pointerEvents: 'none',
+                     boxSizing: 'border-box',
+                     zIndex: 10,
+                   }} />
+                 );
+               })()}
              </div>
-             {selection && selection.w > 4 && selection.h > 4 && (
+             {selection && selection.w > 4 && selection.h > 4 && editMode === 'select' && (
                <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
                  <button
                    onClick={handleCropToSelection}
@@ -1773,6 +2132,55 @@ function App() {
                  >
                    Clear
                  </button>
+               </div>
+             )}
+
+             {/* ── Background Cutout Tools ──────────────────────────────────── */}
+             {imageDimensions && (
+               <div style={{ marginTop: '10px', padding: '10px 12px', backgroundColor: '#1e1e1e', border: '1px solid #333', borderRadius: '6px' }}>
+                 <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#888', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '8px' }}>Cutout Tools</div>
+                 {/* Mode buttons */}
+                 <div style={{ display: 'flex', gap: '6px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                   {(['select', 'erase', 'wand'] as const).map(mode => (
+                     <button key={mode} onClick={() => setEditMode(mode)}
+                       style={{ padding: '6px 14px', border: editMode === mode ? '2px solid #667eea' : '1px solid #444', borderRadius: '5px', cursor: 'pointer', backgroundColor: editMode === mode ? '#2a2f52' : '#2a2a2a', color: editMode === mode ? '#a78bfa' : '#aaa', fontWeight: editMode === mode ? 'bold' : 'normal', fontSize: '13px' }}>
+                       {mode === 'select' ? '✥ Crop Select' : mode === 'erase' ? '🖌 Erase Brush' : '🪄 Magic Wand'}
+                     </button>
+                   ))}
+                 </div>
+                 {/* Erase mode controls */}
+                 {editMode === 'erase' && (
+                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                     <span style={{ fontSize: '12px', color: '#aaa', whiteSpace: 'nowrap' }}>Brush size: {brushSize}px</span>
+                     <input type="range" min={2} max={80} value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))} style={{ flex: 1, minWidth: '100px' }} />
+                     <span style={{ fontSize: '11px', color: '#666' }}>Drag to erase. Right-click drag to restore.</span>
+                   </div>
+                 )}
+                 {/* Wand mode controls */}
+                 {editMode === 'wand' && (
+                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                     <span style={{ fontSize: '12px', color: '#aaa', whiteSpace: 'nowrap' }}>Tolerance: {maskTolerance}</span>
+                     <input type="range" min={1} max={80} value={maskTolerance} onChange={(e) => setMaskTolerance(Number(e.target.value))} style={{ flex: 1, minWidth: '100px' }} />
+                     <span style={{ fontSize: '11px', color: '#666' }}>Click a region to flood-fill erase it.</span>
+                   </div>
+                 )}
+                 {/* Auto remove BG */}
+                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                   <button onClick={autoRemoveBackground}
+                     style={{ padding: '6px 16px', background: 'linear-gradient(135deg, #e67e22 0%, #f39c12 100%)', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', fontFamily: "'Bangers', cursive", fontSize: '16px', letterSpacing: '1px' }}>
+                     ✂ Auto Remove BG
+                   </button>
+                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: 1, minWidth: '140px' }}>
+                     <span style={{ fontSize: '12px', color: '#aaa', whiteSpace: 'nowrap' }}>Tol: {maskTolerance}</span>
+                     <input type="range" min={1} max={80} value={maskTolerance} onChange={(e) => setMaskTolerance(Number(e.target.value))} style={{ flex: 1 }} />
+                   </div>
+                   {hasMask && (
+                     <button onClick={clearAlphaMask}
+                       style={{ padding: '6px 14px', background: '#c0392b', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold' }}>
+                       ✕ Clear Mask
+                     </button>
+                   )}
+                 </div>
                </div>
              )}
            </div>
@@ -1871,7 +2279,7 @@ function App() {
                              next[index] = { ...next[index], hex: e.target.value, rgb };
                              setColors(next);
                              const cv = stencilCanvases[index]?.canvas;
-                             if (cv) { const cx = cv.getContext('2d'); if (cx) { const id = cx.getImageData(0, 0, cv.width, cv.height); const dd = id.data; const [nr, ng, nb] = rgb; for (let pi = 0; pi < cv.width * cv.height; pi++) { if (dd[pi * 4 + 3] >= 128) { dd[pi * 4] = nr; dd[pi * 4 + 1] = ng; dd[pi * 4 + 2] = nb; } } cx.putImageData(id, 0, 0); setStencilCanvases(prev => [...prev]); } }
+                             if (cv) { const cx = cv.getContext('2d', { willReadFrequently: true }); if (cx) { const id = cx.getImageData(0, 0, cv.width, cv.height); const dd = id.data; const [nr, ng, nb] = rgb; for (let pi = 0; pi < cv.width * cv.height; pi++) { if (dd[pi * 4 + 3] >= 128) { dd[pi * 4] = nr; dd[pi * 4 + 1] = ng; dd[pi * 4 + 2] = nb; } } cx.putImageData(id, 0, 0); setStencilCanvases(prev => [...prev]); } }
                            }}
                            title="Swap this colour — all pixels update instantly"
                            style={{ position: 'absolute', inset: 0, opacity: 0, width: '100%', height: '100%', cursor: 'pointer', padding: 0, border: 'none' }}
@@ -1910,8 +2318,11 @@ function App() {
                {svgPreviewContent && (
                  <button
                    onClick={async () => {
+                     const _totalPx = (imageDimensions?.width ?? 1) * (imageDimensions?.height ?? 1);
+                     const _minPx = _totalPx * 0.005;
                      for (let i = 0; i < displayStencils.length; i++) {
                        if (!visibleLayers.has(i)) continue;
+                       if (displayStencils[i].opaquePx < _minPx) continue;
                        const colorHex = colors[i]?.hex ?? '#000000';
                        const svgStr = await canvasToSVGPotrace(displayStencils[i].canvas, colorHex);
                        if (svgStr) downloadSVG(svgStr, `stencil-${i + 1}-${colorHex.replace('#', '')}.svg`);
@@ -1930,7 +2341,7 @@ function App() {
                    style={{ width: '100%' }}
                    dangerouslySetInnerHTML={{ __html: svgPreviewContent
                      .replace(/width="\d+"/, 'width="100%"')
-                     .replace(/height="\d+"/, 'height="auto"')
+                     .replace(/\s*height="\d+"/, '')
                      .replace('<svg ', '<svg style="display:block;max-height:640px;width:100%;object-fit:contain;" ') }}
                  />
                </div>
