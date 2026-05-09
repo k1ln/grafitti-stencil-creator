@@ -23,7 +23,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: stencil-app
-        run: npm ci
+        run: npm install
 
       - name: Build
         working-directory: stencil-app
