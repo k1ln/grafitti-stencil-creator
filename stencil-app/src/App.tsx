@@ -1790,6 +1790,34 @@ function App() {
 
   return (
        <div style={{ padding: '24px 28px', fontFamily: "'Inter', Arial, sans-serif", maxWidth: '1400px', margin: '0 auto', color: '#f0f0f0' }}>
+         {/* ── GitHub link ─────────────────────────────────────────────── */}
+         <a
+           href="https://github.com/k1ln/grafitti-stencil-creator"
+           target="_blank"
+           rel="noopener noreferrer"
+           style={{
+             position: 'fixed', top: '14px', right: '18px', zIndex: 1000,
+             display: 'flex', alignItems: 'center', gap: '7px',
+             padding: '6px 14px',
+             backgroundColor: '#161b22',
+             border: '1px solid #30363d',
+             borderRadius: '8px',
+             color: '#e6edf3',
+             textDecoration: 'none',
+             fontSize: '13px',
+             fontWeight: 600,
+             boxShadow: '0 2px 8px rgba(0,0,0,0.5)',
+             transition: 'border-color 0.15s',
+           }}
+           onMouseEnter={e => (e.currentTarget.style.borderColor = '#667eea')}
+           onMouseLeave={e => (e.currentTarget.style.borderColor = '#30363d')}
+         >
+           <svg height="18" width="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+             <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+           </svg>
+           GitHub
+         </a>
+
          {/* ── Graffiti Logo ──────────────────────────────────────────── */}
          <div style={{ textAlign: 'center', marginBottom: '36px', padding: '20px 0 8px' }}>
            <div style={{
@@ -2058,9 +2086,137 @@ function App() {
            </div>
          )}
 
+         {/* ── Palette Presets (above previews) ───────────────────────── */}
+         <div style={{ marginBottom: '16px' }}>
+           {/* ── Palette presets ─────────────────────────────── */}
+           <div style={{ marginBottom: '12px', padding: '12px', backgroundColor: '#252525', border: '1px solid #333', borderRadius: '8px' }}>
+             <div style={{ fontSize: '13px', fontWeight: 'bold', marginBottom: '10px', color: '#ccc', textTransform: 'uppercase', letterSpacing: '1px' }}>Palette Source</div>
+
+             {/* Group labels + preset buttons */}
+             {(['Retro', 'Pixel Art', 'Stencil'] as const).map(group => (
+               <div key={group} style={{ marginBottom: '8px' }}>
+                 <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>{group}</div>
+                 <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
+                   {PRESET_PALETTES.filter(p => p.group === group).map(({ name, colors: pColors }) => (
+                     <button
+                       key={name}
+                       onClick={() => handlePresetPaletteSelect(name)}
+                       title={`${name} (${pColors.length} colours)`}
+                       style={{
+                         padding: '4px 6px',
+                         border: selectedPalette === name ? '2px solid #667eea' : '1px solid #3a3a3a',
+                         borderRadius: '5px',
+                         cursor: 'pointer',
+                         backgroundColor: selectedPalette === name ? '#2a2f52' : '#2a2a2a',
+                       }}
+                     >
+                       <div style={{ display: 'flex', gap: '1px', marginBottom: '3px' }}>
+                         {pColors.slice(0, 12).map((c, i) => (
+                           <div key={i} style={{ width: '8px', height: '8px', backgroundColor: c.hex, outline: '1px solid rgba(0,0,0,0.12)' }} />
+                         ))}
+                         {pColors.length > 12 && <div style={{ width: '8px', height: '8px', backgroundColor: '#eee', fontSize: '7px', lineHeight: '8px', textAlign: 'center', color: '#999' }}>+</div>}
+                       </div>
+                       <div style={{ fontSize: '9px', whiteSpace: 'nowrap', textAlign: 'center', color: selectedPalette === name ? '#667eea' : '#aaa' }}>{name}</div>
+                     </button>
+                   ))}
+                 </div>
+               </div>
+             ))}
+
+             {/* Auto (from image) */}
+             <div>
+               <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>From Image</div>
+               <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                 <button
+                   onClick={() => handlePresetPaletteSelect('auto')}
+                   style={{
+                     padding: '5px 14px',
+                     border: selectedPalette === 'auto' ? '2px solid #667eea' : '1px solid #3a3a3a',
+                     borderRadius: '5px',
+                     cursor: 'pointer',
+                     backgroundColor: selectedPalette === 'auto' ? '#2a2f52' : '#2a2a2a',
+                     fontWeight: selectedPalette === 'auto' ? 'bold' : 'normal',
+                     color: selectedPalette === 'auto' ? '#667eea' : '#aaa',
+                     fontSize: '12px',
+                   }}
+                 >
+                   Auto-detect from image
+                 </button>
+                 {selectedPalette === 'auto' && (
+                   <div style={{ display: 'flex', gap: '3px', alignItems: 'center', flexWrap: 'wrap' }}>
+                     <span style={{ fontSize: '12px', color: '#888' }}>Colors:</span>
+                     {Array.from({ length: 20 }, (_, i) => i + 1).map((size) => (
+                       <button
+                         key={size}
+                         onClick={() => handlePaletteSizeChange(size)}
+                         style={{
+                           padding: '3px 7px',
+                           backgroundColor: size === paletteSize ? '#667eea' : '#333',
+                           color: size === paletteSize ? 'white' : '#ccc',
+                           border: 'none',
+                           borderRadius: '3px',
+                           cursor: 'pointer',
+                           fontSize: '12px',
+                         }}
+                       >
+                         {size}
+                       </button>
+                     ))}
+                   </div>
+                 )}
+               </div>
+             </div>
+           </div>
+
+           {/* ── Active colour swatches ────────────────────────────────── */}
+           {colors.length > 0 && (
+             <div style={{ padding: '12px', backgroundColor: '#1e1e1e', border: '1px solid #333', borderRadius: '8px' }}>
+               <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#888', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px' }}>
+                 Active Colours — click swatch to swap colour instantly
+               </div>
+               <div style={{ display: 'flex', gap: '9px', flexWrap: 'wrap', marginBottom: '10px', alignItems: 'flex-start' }}>
+                 {colors.map((color, index) => (
+                   <div key={index} onClick={() => setSelectedColorIndex(index)} title={`${color.hex} — click to swap colour instantly`}
+                     style={{ position: 'relative', padding: '5px', border: index === selectedColorIndex ? '2px solid #a78bfa' : '1px solid #3a3a3a', borderRadius: '5px', cursor: 'pointer', backgroundColor: '#252525' }}>
+                     <button onClick={(e) => { e.stopPropagation(); handleDeleteColor(index); }} title="Remove this colour"
+                       style={{ position: 'absolute', top: '-8px', right: '-8px', width: '17px', height: '17px', background: '#c0392b', color: 'white', border: 'none', borderRadius: '50%', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '11px', zIndex: 2, boxShadow: '0 1px 4px rgba(0,0,0,0.6)', padding: 0, lineHeight: 1 }}>×</button>
+                     <div style={{ position: 'relative', width: '42px', height: '42px' }}>
+                       <div style={{ width: '42px', height: '42px', backgroundColor: color.hex, outline: '1px solid rgba(255,255,255,0.12)' }} />
+                       <input type="color" value={color.hex} onClick={(e) => e.stopPropagation()}
+                         onChange={(e) => {
+                           setSelectedColorIndex(index);
+                           colorsEditedRef.current = true;
+                           const rgb = hexToRgb(e.target.value);
+                           const next = [...colors];
+                           next[index] = { ...next[index], hex: e.target.value, rgb };
+                           setColors(next);
+                           const cv = stencilCanvases[index]?.canvas;
+                           if (cv) { const cx = cv.getContext('2d', { willReadFrequently: true }); if (cx) { const id = cx.getImageData(0, 0, cv.width, cv.height); const dd = id.data; const [nr, ng, nb] = rgb; for (let pi = 0; pi < cv.width * cv.height; pi++) { if (dd[pi * 4 + 3] >= 128) { dd[pi * 4] = nr; dd[pi * 4 + 1] = ng; dd[pi * 4 + 2] = nb; } } cx.putImageData(id, 0, 0); setStencilCanvases(prev => [...prev]); } }
+                         }}
+                         title="Swap this colour — all pixels update instantly"
+                         style={{ position: 'absolute', inset: 0, opacity: 0, width: '100%', height: '100%', cursor: 'pointer', padding: 0, border: 'none' }}
+                       />
+                     </div>
+                     <div style={{ fontSize: '9px', textAlign: 'center', color: '#888', marginTop: '3px' }}>{color.hex}</div>
+                   </div>
+                 ))}
+                 <button onClick={handleAddColor} title="Add a new colour"
+                   style={{ width: '56px', minHeight: '76px', border: '1px dashed #555', borderRadius: '5px', background: 'transparent', color: '#667eea', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: '2px' }}>
+                   <span style={{ fontSize: '24px', lineHeight: 1 }}>+</span>
+                   <span style={{ fontSize: '9px', color: '#aaa' }}>Add</span>
+                 </button>
+               </div>
+               <button onClick={handleResetColors}
+                 style={{ padding: '6px 16px', background: 'linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontFamily: "'Bangers', cursive", fontSize: '16px', letterSpacing: '1px' }}>
+                 Reset Colors
+               </button>
+             </div>
+           )}
+         </div>
+
          <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', marginBottom: '20px', alignItems: 'flex-start' }}>
            <div style={{ flex: 1, minWidth: '300px' }}>
-             <h2>Original Image</h2>
+             <h2 style={{ marginTop: 0 }}>Original Image</h2>
              <div
                ref={canvasContainerRef}
                style={{ position: 'relative', display: 'inline-block', width: '100%', cursor: editMode === 'erase' ? 'none' : imageDimensions ? 'crosshair' : 'default' }}
@@ -2186,28 +2342,7 @@ function App() {
            </div>
         
            <div style={{ flex: 1, minWidth: '500px' }}>
-             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginBottom: '6px' }}>
-               <h2 style={{ margin: 0 }}>Preview (Layered Stencils)</h2>
-               {imageDimensions && (
-                 <button
-                   onClick={handleApplyAdjustments}
-                   style={{
-                     padding: '8px 20px',
-                     background: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)',
-                     color: '#051a05',
-                     border: 'none',
-                     borderRadius: '6px',
-                     cursor: 'pointer',
-                     fontFamily: "'Bangers', cursive",
-                     fontSize: '17px',
-                     letterSpacing: '2px',
-                     boxShadow: '0 3px 12px rgba(17,153,142,0.45)',
-                   }}
-                 >
-                   ⚡ RE-RENDER
-                 </button>
-               )}
-             </div>
+             <h2 style={{ marginTop: 0 }}>Preview (Layered Stencils)</h2>
              <canvas 
                ref={previewCanvasRef}
                onClick={handlePreviewClick}
@@ -2256,50 +2391,6 @@ function App() {
                </div>
              )}
 
-             {/* ── Active colour swatches — directly under preview ────────────────── */}
-             {colors.length > 0 && (
-               <div style={{ marginTop: '14px', padding: '12px', backgroundColor: '#1e1e1e', border: '1px solid #333', borderRadius: '8px' }}>
-                 <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#888', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '10px' }}>
-                   Active Colours — click swatch to swap colour instantly
-                 </div>
-                 <div style={{ display: 'flex', gap: '9px', flexWrap: 'wrap', marginBottom: '10px', alignItems: 'flex-start' }}>
-                   {colors.map((color, index) => (
-                     <div key={index} onClick={() => setSelectedColorIndex(index)} title={`${color.hex} — click to swap colour instantly`}
-                       style={{ position: 'relative', padding: '5px', border: index === selectedColorIndex ? '2px solid #a78bfa' : '1px solid #3a3a3a', borderRadius: '5px', cursor: 'pointer', backgroundColor: '#252525' }}>
-                       <button onClick={(e) => { e.stopPropagation(); handleDeleteColor(index); }} title="Remove this colour"
-                         style={{ position: 'absolute', top: '-8px', right: '-8px', width: '17px', height: '17px', background: '#c0392b', color: 'white', border: 'none', borderRadius: '50%', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '11px', zIndex: 2, boxShadow: '0 1px 4px rgba(0,0,0,0.6)', padding: 0, lineHeight: 1 }}>×</button>
-                       <div style={{ position: 'relative', width: '42px', height: '42px' }}>
-                         <div style={{ width: '42px', height: '42px', backgroundColor: color.hex, outline: '1px solid rgba(255,255,255,0.12)' }} />
-                         <input type="color" value={color.hex} onClick={(e) => e.stopPropagation()}
-                           onChange={(e) => {
-                             setSelectedColorIndex(index);
-                             colorsEditedRef.current = true;
-                             const rgb = hexToRgb(e.target.value);
-                             const next = [...colors];
-                             next[index] = { ...next[index], hex: e.target.value, rgb };
-                             setColors(next);
-                             const cv = stencilCanvases[index]?.canvas;
-                             if (cv) { const cx = cv.getContext('2d', { willReadFrequently: true }); if (cx) { const id = cx.getImageData(0, 0, cv.width, cv.height); const dd = id.data; const [nr, ng, nb] = rgb; for (let pi = 0; pi < cv.width * cv.height; pi++) { if (dd[pi * 4 + 3] >= 128) { dd[pi * 4] = nr; dd[pi * 4 + 1] = ng; dd[pi * 4 + 2] = nb; } } cx.putImageData(id, 0, 0); setStencilCanvases(prev => [...prev]); } }
-                           }}
-                           title="Swap this colour — all pixels update instantly"
-                           style={{ position: 'absolute', inset: 0, opacity: 0, width: '100%', height: '100%', cursor: 'pointer', padding: 0, border: 'none' }}
-                         />
-                       </div>
-                       <div style={{ fontSize: '9px', textAlign: 'center', color: '#888', marginTop: '3px' }}>{color.hex}</div>
-                     </div>
-                   ))}
-                   <button onClick={handleAddColor} title="Add a new colour"
-                     style={{ width: '56px', minHeight: '76px', border: '1px dashed #555', borderRadius: '5px', background: 'transparent', color: '#667eea', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: '2px' }}>
-                     <span style={{ fontSize: '24px', lineHeight: 1 }}>+</span>
-                     <span style={{ fontSize: '9px', color: '#aaa' }}>Add</span>
-                   </button>
-                 </div>
-                 <button onClick={handleResetColors}
-                   style={{ padding: '6px 16px', background: 'linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontFamily: "'Bangers', cursive", fontSize: '16px', letterSpacing: '1px' }}>
-                   Reset Colors
-                 </button>
-               </div>
-             )}
            </div>
          </div>
 
@@ -2353,89 +2444,7 @@ function App() {
            </div>
          )}
 
-         <div style={{ marginTop: '20px' }}>
-           <h2>Palette Presets</h2>
 
-           {/* ── Palette presets ─────────────────────────────── */}
-           <div style={{ marginBottom: '16px', padding: '12px', backgroundColor: '#252525', border: '1px solid #333', borderRadius: '8px' }}>
-             <div style={{ fontSize: '13px', fontWeight: 'bold', marginBottom: '10px', color: '#ccc', textTransform: 'uppercase', letterSpacing: '1px' }}>Palette Source</div>
-
-             {/* Group labels + preset buttons */}
-             {(['Retro', 'Pixel Art', 'Stencil'] as const).map(group => (
-               <div key={group} style={{ marginBottom: '8px' }}>
-                 <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>{group}</div>
-                 <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
-                   {PRESET_PALETTES.filter(p => p.group === group).map(({ name, colors: pColors }) => (
-                     <button
-                       key={name}
-                       onClick={() => handlePresetPaletteSelect(name)}
-                       title={`${name} (${pColors.length} colours)`}
-                       style={{
-                         padding: '4px 6px',
-                         border: selectedPalette === name ? '2px solid #667eea' : '1px solid #3a3a3a',
-                         borderRadius: '5px',
-                         cursor: 'pointer',
-                         backgroundColor: selectedPalette === name ? '#2a2f52' : '#2a2a2a',
-                       }}
-                     >
-                       <div style={{ display: 'flex', gap: '1px', marginBottom: '3px' }}>
-                         {pColors.slice(0, 12).map((c, i) => (
-                           <div key={i} style={{ width: '8px', height: '8px', backgroundColor: c.hex, outline: '1px solid rgba(0,0,0,0.12)' }} />
-                         ))}
-                         {pColors.length > 12 && <div style={{ width: '8px', height: '8px', backgroundColor: '#eee', fontSize: '7px', lineHeight: '8px', textAlign: 'center', color: '#999' }}>+</div>}
-                       </div>
-                       <div style={{ fontSize: '9px', whiteSpace: 'nowrap', textAlign: 'center', color: selectedPalette === name ? '#667eea' : '#aaa' }}>{name}</div>
-                     </button>
-                   ))}
-                 </div>
-               </div>
-             ))}
-
-             {/* Auto (from image) */}
-             <div>
-               <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>From Image</div>
-               <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
-                 <button
-                   onClick={() => handlePresetPaletteSelect('auto')}
-                   style={{
-                     padding: '5px 14px',
-                     border: selectedPalette === 'auto' ? '2px solid #667eea' : '1px solid #3a3a3a',
-                     borderRadius: '5px',
-                     cursor: 'pointer',
-                     backgroundColor: selectedPalette === 'auto' ? '#2a2f52' : '#2a2a2a',
-                     fontWeight: selectedPalette === 'auto' ? 'bold' : 'normal',
-                     color: selectedPalette === 'auto' ? '#667eea' : '#aaa',
-                     fontSize: '12px',
-                   }}
-                 >
-                   Auto-detect from image
-                 </button>
-                 {selectedPalette === 'auto' && (
-                   <div style={{ display: 'flex', gap: '3px', alignItems: 'center', flexWrap: 'wrap' }}>
-                     <span style={{ fontSize: '12px', color: '#888' }}>Colors:</span>
-                     {Array.from({ length: 20 }, (_, i) => i + 1).map((size) => (
-                       <button
-                         key={size}
-                         onClick={() => handlePaletteSizeChange(size)}
-                         style={{
-                           padding: '3px 7px',
-                           backgroundColor: size === paletteSize ? '#667eea' : '#333',
-                           color: size === paletteSize ? 'white' : '#ccc',
-                           border: 'none',
-                           borderRadius: '3px',
-                           cursor: 'pointer',
-                           fontSize: '12px',
-                         }}
-                       >
-                         {size}
-                       </button>
-                     ))}
-                   </div>
-                 )}
-               </div>
-             </div>
-           </div>
-         </div>
 
          {stencilCanvases.length > 0 && (() => {
            const totalPx = (imageDimensions?.width ?? 1) * (imageDimensions?.height ?? 1);
