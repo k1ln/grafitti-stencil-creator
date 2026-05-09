@@ -1,0 +1,51 @@
+name: Build & Deploy to Scaleway
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: stencil-app/package.json
+
+      - name: Install dependencies
+        working-directory: stencil-app
+        run: npm ci
+
+      - name: Build
+        working-directory: stencil-app
+        run: npm run build
+
+      - name: Install AWS CLI
+        run: |
+          pip install awscli --quiet
+
+      - name: Sync to Scaleway Object Storage
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SCW_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SCW_SECRET_KEY }}
+        run: |
+          aws s3 sync stencil-app/dist/ s3://stenciltool/ \
+            --endpoint-url https://s3.fr-par.scw.cloud \
+            --region fr-par \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "index.html"
+
+          # Upload index.html with no-cache so updates are picked up immediately
+          aws s3 cp stencil-app/dist/index.html s3://stenciltool/index.html \
+            --endpoint-url https://s3.fr-par.scw.cloud \
+            --region fr-par \
+            --cache-control "no-cache, no-store, must-revalidate"
