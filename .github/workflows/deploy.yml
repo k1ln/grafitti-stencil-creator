@@ -36,9 +36,11 @@ jobs:
           aws s3 sync stencil-app/dist/ s3://stenciltool/ \
             --endpoint-url "https://s3.${{ secrets.SCW_REGION }}.scw.cloud" \
             --exclude "index.html" \
+            --acl public-read \
             --delete
 
           aws s3 cp stencil-app/dist/index.html s3://stenciltool/index.html \
             --endpoint-url "https://s3.${{ secrets.SCW_REGION }}.scw.cloud" \
-            --cache-control "no-cache, no-store, must-revalidate"
+            --cache-control "no-cache, no-store, must-revalidate" \
+            --acl public-read
 
