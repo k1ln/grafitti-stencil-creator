@@ -48,15 +48,3 @@ jobs:
             --cache-control "no-cache, no-store, must-revalidate" \
             --acl public-read
 
-          # Enable static website hosting (index + error document)
-          aws s3api put-bucket-website \
-            --endpoint-url "$ENDPOINT" \
-            --bucket stenciltool \
-            --website-configuration '{"IndexDocument":{"Suffix":"index.html"},"ErrorDocument":{"Key":"index.html"}}'
-
-          # Apply public-read bucket policy so objects are accessible
-          aws s3api put-bucket-policy \
-            --endpoint-url "$ENDPOINT" \
-            --bucket stenciltool \
-            --policy '{"Version":"2023-04-17","Id":"PublicRead","Statement":[{"Sid":"AllowPublicRead","Effect":"Allow","Principal":"*","Action":["s3:GetObject"],"Resource":["stenciltool/*"]}]}'
-
