@@ -36,14 +36,14 @@ jobs:
           ENDPOINT="https://s3.${{ secrets.SCW_REGION }}.scw.cloud"
 
           # Upload all assets (hashed filenames, long cache)
-          aws s3 sync stencil-app/dist/ s3://stenciltool/ \
+          aws s3 sync stencil-app/dist/ s3://stenciltool-bucket/ \
             --endpoint-url "$ENDPOINT" \
             --exclude "index.html" \
             --acl public-read \
             --delete
 
           # Upload index.html with no-cache
-          aws s3 cp stencil-app/dist/index.html s3://stenciltool/index.html \
+          aws s3 cp stencil-app/dist/index.html s3://stenciltool-bucket/index.html \
             --endpoint-url "$ENDPOINT" \
             --cache-control "no-cache, no-store, must-revalidate" \
             --acl public-read
