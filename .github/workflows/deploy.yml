@@ -39,6 +39,7 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.SCW_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.SCW_SECRET_KEY }}
           BUCKET_NAME: ${{ secrets.SCW_BUCKET_NAME }}
+          AWS_DEFAULT_REGION: fr-par
         run: |
           aws s3 sync stencil-app/dist/ s3://${BUCKET_NAME}/ \
             --endpoint-url https://s3.fr-par.scw.cloud \
