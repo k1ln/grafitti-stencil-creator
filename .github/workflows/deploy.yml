@@ -8,6 +8,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    if: contains(github.event.head_commit.message, '/prod')
 
     steps:
       - name: Checkout
@@ -36,8 +37,9 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.SCW_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.SCW_SECRET_KEY }}
+          BUCKET_NAME: ${{ secrets.SCW_BUCKET_NAME }}
         run: |
-          aws s3 sync stencil-app/dist/ s3://stenciltool/ \
+          aws s3 sync stencil-app/dist/ s3://${BUCKET_NAME}/ \
             --endpoint-url https://s3.fr-par.scw.cloud \
             --region fr-par \
             --delete \
@@ -45,7 +47,7 @@ jobs:
             --exclude "index.html"
 
           # Upload index.html with no-cache so updates are picked up immediately
-          aws s3 cp stencil-app/dist/index.html s3://stenciltool/index.html \
+          aws s3 cp stencil-app/dist/index.html s3://${BUCKET_NAME}/index.html \
             --endpoint-url https://s3.fr-par.scw.cloud \
             --region fr-par \
             --cache-control "no-cache, no-store, must-revalidate"
