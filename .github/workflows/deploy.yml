@@ -2,14 +2,11 @@ name: Build & Deploy to Scaleway
 
 on:
   push:
-    branches:
-      - main
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
-    environment: env
     if: contains(github.event.head_commit.message, '/prod')
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -30,25 +27,18 @@ jobs:
         working-directory: stencil-app
         run: npm run build
 
-      - name: Install rclone
-        run: curl https://rclone.org/install.sh | sudo bash
-
-      - name: Sync to Scaleway Object Storage
+      - name: Deploy to Scaleway Object Storage
         env:
-          RCLONE_CONFIG_SCW_TYPE: s3
-          RCLONE_CONFIG_SCW_PROVIDER: Scaleway
-          RCLONE_CONFIG_SCW_ACCESS_KEY_ID: ${{ secrets.SCW_ACCESS_KEY }}
-          RCLONE_CONFIG_SCW_SECRET_ACCESS_KEY: ${{ secrets.SCW_SECRET_KEY }}
-          RCLONE_CONFIG_SCW_REGION: fr-par
-          RCLONE_CONFIG_SCW_ENDPOINT: s3.fr-par.scw.cloud
-          BUCKET_NAME: ${{ secrets.SCW_BUCKET_NAME }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.SCW_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SCW_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.SCW_REGION }}
         run: |
-          # Sync all assets with long-lived caching (hashed filenames), except index.html
-          rclone sync stencil-app/dist/ scw:${BUCKET_NAME}/ \
+          aws s3 sync stencil-app/dist/ s3://stenciltool/ \
+            --endpoint-url "https://s3.${{ secrets.SCW_REGION }}.scw.cloud" \
             --exclude "index.html" \
-            --header-upload "Cache-Control: public, max-age=31536000, immutable" \
-            --transfers 8
+            --delete
 
-          # Upload index.html with no-cache so updates are picked up immediately
-          rclone copyto stencil-app/dist/index.html scw:${BUCKET_NAME}/index.html \
-            --header-upload "Cache-Control: no-cache, no-store, must-revalidate"
+          aws s3 cp stencil-app/dist/index.html s3://stenciltool/index.html \
+            --endpoint-url "https://s3.${{ secrets.SCW_REGION }}.scw.cloud" \
+            --cache-control "no-cache, no-store, must-revalidate"
+
